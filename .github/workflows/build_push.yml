@@ -57,6 +57,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
@@ -70,6 +76,12 @@ jobs:
 
       - name: Move APKs
         run: python .github/scripts/move-apks.py
+
+      - name: Run extensions inspector
+        run: |
+          INSPECTOR_LINK="$(curl -s "https://api.github.com/repos/komikku-app/aniyomi-extensions-inspector/releases/latest" | jq -r '.assets[0].browser_download_url')"
+          curl -L "$INSPECTOR_LINK" -o ./Inspector.jar
+          java -jar ./Inspector.jar "repo/apk" "inspector-output.json" "tmp"
 
       - name: Generate repo index
         run: |
