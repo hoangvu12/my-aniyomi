@@ -4,9 +4,9 @@ set -euo pipefail
 REPO_DIR="repo"
 BRANCH="repo"
 
-# Configure git
-git config user.name "github-actions[bot]"
-git config user.email "github-actions[bot]@users.noreply.github.com"
+# Configure git globally so it applies to temp repos too
+git config --global user.name "github-actions[bot]"
+git config --global user.email "github-actions[bot]@users.noreply.github.com"
 
 # Create a temporary directory for the repo branch
 TEMP_DIR=$(mktemp -d)
@@ -24,7 +24,7 @@ else
 fi
 
 # Sync APKs and index to the temp directory
-rsync -av --delete "$REPO_DIR/" "$TEMP_DIR/"
+rsync -av --delete --exclude='.git' "$REPO_DIR/" "$TEMP_DIR/"
 
 cd "$TEMP_DIR"
 
