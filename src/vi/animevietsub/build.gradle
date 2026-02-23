@@ -1,0 +1,8 @@
+ext {
+    extName = 'AnimeVietSub'
+    extClass = '.AnimeVietSub'
+    extVersionCode = 1
+    isNsfw = false
+}
+
+apply from: "$rootDir/common.gradle"

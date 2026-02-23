@@ -1,0 +1,76 @@
+apply plugin: 'com.android.application'
+apply plugin: 'org.jetbrains.kotlin.android'
+apply plugin: 'org.jetbrains.kotlin.plugin.serialization'
+
+def extName = project.ext.has('extName') ? project.ext.get('extName') : ''
+def extClass = project.ext.has('extClass') ? project.ext.get('extClass') : ''
+def extVersionCode = project.ext.has('extVersionCode') ? project.ext.get('extVersionCode') : 1
+def isNsfw = project.ext.has('isNsfw') ? project.ext.get('isNsfw') : false
+
+android {
+    compileSdk AndroidConfig.compileSdk
+    namespace AndroidConfig.namespaceExtension
+
+    defaultConfig {
+        minSdk AndroidConfig.minSdk
+        targetSdk AndroidConfig.targetSdk
+
+        applicationIdSuffix project.parent.name + '.' + project.name
+        versionCode extVersionCode
+        versionName '14.' + versionCode
+        setProperty('archivesBaseName', "aniyomi-${project.parent.name}-${project.name}-v${versionName}")
+
+        manifestPlaceholders.put('appName', "Aniyomi: ${extName}")
+        manifestPlaceholders.put('extClass', extClass)
+        manifestPlaceholders.put('nsfw', isNsfw ? 1 : 0)
+    }
+
+    signingConfigs {
+        if (System.getenv('KEY_ALIAS')) {
+            release {
+                storeFile rootProject.file('signingkey.jks')
+                storePassword System.getenv('KEY_STORE_PASSWORD')
+                keyAlias System.getenv('KEY_ALIAS')
+                keyPassword System.getenv('KEY_PASSWORD')
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            if (signingConfigs.names.contains('release')) {
+                signingConfig signingConfigs.release
+            }
+        }
+    }
+
+    sourceSets {
+        main {
+            manifest.srcFile 'AndroidManifest.xml'
+            java.srcDirs = ['src']
+            res.srcDirs = ['res']
+        }
+    }
+
+    buildFeatures {
+        aidl false
+        resValues false
+        shaders false
+        buildConfig true
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+
+    kotlinOptions {
+        jvmTarget = JavaVersion.VERSION_1_8.toString()
+    }
+}
+
+dependencies {
+    implementation(project(':core'))
+    compileOnly(versionCatalogs.named('libs').findBundle('common').get())
+}
