@@ -213,6 +213,7 @@ class AnimeVietSub : AnimeHttpSource() {
 
         val videos = mutableListOf<Video>()
         val serverButtons = epDoc.select("a.btn3dsv[data-href]")
+        val errors = mutableListOf<String>()
 
         for (btn in serverButtons) {
             val dataHref = btn.attr("data-href")
@@ -229,42 +230,61 @@ class AnimeVietSub : AnimeHttpSource() {
                     .add("backuplinks", "1")
                     .build()
 
+                val playerHeaders = headersBuilder()
+                    .set("Referer", baseUrl + episode.url)
+                    .add("X-Requested-With", "XMLHttpRequest")
+                    .add("Accept", "*/*")
+                    .build()
+
                 val playerResp = client.newCall(
-                    POST(
-                        "$baseUrl/ajax/player",
-                        headers = Headers.Builder()
-                            .add("Referer", baseUrl + episode.url)
-                            .add("X-Requested-With", "XMLHttpRequest")
-                            .build(),
-                        body = formBody,
-                    ),
+                    POST("$baseUrl/ajax/player", headers = playerHeaders, body = formBody),
                 ).awaitSuccess()
 
                 val playerBody = playerResp.body.string()
-                if (playerBody.isBlank()) continue
+                if (playerBody.isBlank()) {
+                    errors.add("$serverName: empty response")
+                    continue
+                }
 
                 val jsonObj = json.parseToJsonElement(playerBody).jsonObject
                 val success = jsonObj["success"]?.jsonPrimitive?.content
-                if (success != "1") continue
+                if (success != "1") {
+                    errors.add("$serverName: success=$success")
+                    continue
+                }
 
                 val playTech = jsonObj["playTech"]?.jsonPrimitive?.content ?: ""
                 val linkElement = jsonObj["link"]
-                if (linkElement == null || linkElement.toString() == "null") continue
+                if (linkElement == null || linkElement.toString() == "null") {
+                    errors.add("$serverName: link=null, playTech=$playTech")
+                    continue
+                }
 
                 if (playTech == "api") {
                     val linkArray = linkElement.jsonArray
                     for (item in linkArray) {
                         val file = item.jsonObject["file"]?.jsonPrimitive?.content ?: continue
-                        val m3u8Content = decryptFile(file) ?: continue
+                        val m3u8Content = decryptFile(file)
+                        if (m3u8Content == null) {
+                            errors.add("$serverName: decrypt failed")
+                            continue
+                        }
                         videos.addAll(extractVideosFromM3u8(m3u8Content, serverName))
                     }
                 } else if (playTech == "embed") {
                     val embedUrl = linkElement.jsonPrimitive.content
                     if (embedUrl.isNotBlank()) {
                         extractVideosFromEmbed(embedUrl, serverName)?.let { videos.addAll(it) }
+                            ?: errors.add("$serverName: no m3u8 in embed")
                     }
                 }
-            } catch (_: Exception) {}
+            } catch (e: Exception) {
+                errors.add("$serverName: ${e.message}")
+            }
+        }
+
+        if (videos.isEmpty() && errors.isNotEmpty()) {
+            throw Exception("No streams: ${errors.joinToString("; ")}")
         }
 
         return videos
