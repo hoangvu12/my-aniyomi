@@ -2,10 +2,10 @@
   {
     "name": "Aniyomi: anime47.best",
     "pkg": "eu.kanade.tachiyomi.animeextension.vi.anime47best",
-    "apk": "aniyomi-vi-anime47best-v14.1.apk",
+    "apk": "aniyomi-vi-anime47best-v14.2.apk",
     "lang": "vi",
-    "code": 1,
-    "version": "14.1",
+    "code": 2,
+    "version": "14.2",
     "nsfw": 0,
     "sources": [
       {
