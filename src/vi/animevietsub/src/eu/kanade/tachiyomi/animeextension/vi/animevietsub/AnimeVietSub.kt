@@ -217,13 +217,11 @@ class AnimeVietSub : AnimeHttpSource() {
 
         if (serverButtons.isEmpty()) {
             val title = epDoc.selectFirst("title")?.text() ?: "no title"
-            val hasCloudflare = epDoc.html().contains("cloudflare", ignoreCase = true)
-            val bodyLen = epDoc.html().length
-            return listOf(Video(
-                "$baseUrl/debug",
-                "DEBUG: 0 buttons | title=$title | CF=$hasCloudflare | len=$bodyLen",
-                "$baseUrl/debug",
-            ))
+            val bodyText = epDoc.body()?.text()?.take(200) ?: "empty"
+            return listOf(
+                Video("$baseUrl/d", "DBG1: title=$title", "$baseUrl/d"),
+                Video("$baseUrl/d2", "DBG2: $bodyText", "$baseUrl/d2"),
+            )
         }
 
         for (btn in serverButtons) {
