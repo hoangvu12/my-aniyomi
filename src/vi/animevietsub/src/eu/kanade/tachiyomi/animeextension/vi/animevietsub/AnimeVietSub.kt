@@ -21,6 +21,8 @@ import okhttp3.Response
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.parser.Parser
+import java.io.ByteArrayOutputStream
+import java.util.zip.Inflater
 import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
@@ -179,17 +181,18 @@ class AnimeVietSub : AnimeHttpSource() {
         val serverButtons = epDoc.select("a.btn3dsv[data-href]")
 
         for (btn in serverButtons) {
-            val hash = btn.attr("data-href")
+            val dataHref = btn.attr("data-href")
             val serverName = btn.text().trim()
             val play = btn.attr("data-play")
 
-            if (hash.isBlank()) continue
+            if (dataHref.isBlank()) continue
 
             try {
                 val formBody = FormBody.Builder()
-                    .add("hash", hash)
+                    .add("link", dataHref)
                     .add("id", btn.attr("data-id"))
                     .add("play", play)
+                    .add("backuplinks", "1")
                     .build()
 
                 val playerResp = client.newCall(
@@ -212,20 +215,18 @@ class AnimeVietSub : AnimeHttpSource() {
 
                 val playTech = jsonObj["playTech"]?.jsonPrimitive?.content ?: ""
                 val linkElement = jsonObj["link"]
+                if (linkElement == null || linkElement.toString() == "null") continue
 
-                if (playTech == "api" && linkElement != null) {
-                    // API type: link is an array of {file: "encrypted_data"}
+                if (playTech == "api") {
                     val linkArray = linkElement.jsonArray
                     for (item in linkArray) {
                         val file = item.jsonObject["file"]?.jsonPrimitive?.content ?: continue
                         val m3u8Content = decryptFile(file)
                         if (m3u8Content != null) {
-                            // Extract m3u8 URLs from the decrypted playlist
                             videos.addAll(extractVideosFromM3u8(m3u8Content, serverName))
                         }
                     }
-                } else if (playTech == "embed" && linkElement != null) {
-                    // Embed type: link is a direct URL string
+                } else if (playTech == "embed") {
                     val embedUrl = linkElement.jsonPrimitive.content
                     if (embedUrl.isNotBlank()) {
                         extractVideosFromEmbed(embedUrl, serverName)?.let { videos.addAll(it) }
@@ -239,27 +240,34 @@ class AnimeVietSub : AnimeHttpSource() {
 
     private fun decryptFile(file: String): String? {
         return try {
-            // Strip the /aKnB/ prefix
-            val encoded = file.removePrefix("/aKnB/")
-            // Base64 decode (handle URL-safe base64)
-            val data = Base64.decode(encoded, Base64.DEFAULT)
-            // First 16 bytes are the IV, rest is ciphertext
+            val data = Base64.decode(file, Base64.DEFAULT)
             val iv = data.copyOfRange(0, 16)
             val ciphertext = data.copyOfRange(16, data.size)
-            // AES-256-CBC decrypt
             val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
             cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(AES_KEY, "AES"), IvParameterSpec(iv))
-            String(cipher.doFinal(ciphertext))
-        } catch (e: Exception) {
+            val decrypted = cipher.doFinal(ciphertext)
+            // Decompress with raw inflate (deflate without header)
+            inflateRaw(decrypted)
+        } catch (_: Exception) {
             null
         }
     }
 
+    private fun inflateRaw(data: ByteArray): String {
+        val inflater = Inflater(true) // true = raw deflate (no zlib header)
+        inflater.setInput(data)
+        val output = ByteArrayOutputStream()
+        val buffer = ByteArray(4096)
+        while (!inflater.finished()) {
+            val count = inflater.inflate(buffer)
+            output.write(buffer, 0, count)
+        }
+        inflater.end()
+        return output.toString("UTF-8")
+    }
+
     private fun extractVideosFromM3u8(m3u8Content: String, serverName: String): List<Video> {
         val videos = mutableListOf<Video>()
-        // The decrypted content is a full m3u8 playlist with absolute segment URLs
-        // We need to serve it as a data URI or find a way to play it
-        // For Aniyomi, we extract individual segment URLs or use the master playlist
 
         // Check if it's a master playlist with multiple qualities
         val streamRegex = Regex("""#EXT-X-STREAM-INF:.*?RESOLUTION=(\d+x\d+).*?\n(https?://.+)""")
@@ -272,11 +280,9 @@ class AnimeVietSub : AnimeHttpSource() {
                 videos.add(Video(url, "$serverName - $resolution", url))
             }
         } else {
-            // Single quality - the whole content IS the playlist
-            // Extract the first segment URL to get the base CDN URL
-            val segmentUrl = Regex("""(https?://[^\s]+)""").find(m3u8Content)?.value
-            if (segmentUrl != null) {
-                // Create a data URI m3u8 that Aniyomi can play
+            // Single quality playlist - use data URI so Aniyomi can play it
+            val hasSegments = m3u8Content.contains("https://")
+            if (hasSegments) {
                 val dataUri = "data:application/x-mpegURL;base64," +
                     Base64.encodeToString(m3u8Content.toByteArray(), Base64.NO_WRAP)
                 videos.add(Video(dataUri, "$serverName - HLS", dataUri))
