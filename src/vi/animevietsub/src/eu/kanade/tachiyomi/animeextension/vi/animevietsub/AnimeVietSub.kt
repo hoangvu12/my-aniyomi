@@ -380,6 +380,19 @@ class AnimeVietSub : AnimeHttpSource() {
     }
 
     companion object {
+        init {
+            try {
+                Runtime.getRuntime().addShutdownHook(
+                    Thread(
+                        { closeLocalServer() },
+                        "AnimeVietSub-M3U8Shutdown",
+                    ),
+                )
+            } catch (_: Exception) {
+                // Ignore when shutdown hooks are not available.
+            }
+        }
+
         private val localM3u8Cache = ConcurrentHashMap<String, CachedPlaylist>()
         private val localProxyCache = ConcurrentHashMap<String, ProxiedResource>()
         private val localServerLock = Any()
@@ -498,6 +511,16 @@ class AnimeVietSub : AnimeHttpSource() {
                     // Keep serving after transient failures.
                 }
             }
+            synchronized(localServerLock) {
+                if (localServerSocket === server) {
+                    localServerSocket = null
+                    localServerPort = -1
+                    localServerThread = null
+                    localProxyClient = null
+                    localM3u8Cache.clear()
+                    localProxyCache.clear()
+                }
+            }
         }
 
         private fun handleLocalRequest(socket: Socket) {
@@ -575,6 +598,23 @@ class AnimeVietSub : AnimeHttpSource() {
                 }
 
                 writeHttpResponse(output, 404, "Not Found", "Not found".toByteArray())
+            }
+        }
+
+        private fun closeLocalServer() {
+            synchronized(localServerLock) {
+                try {
+                    localServerSocket?.close()
+                } catch (_: Exception) {
+                    // Ignore close failures during shutdown.
+                }
+
+                localServerSocket = null
+                localServerPort = -1
+                localServerThread = null
+                localProxyClient = null
+                localM3u8Cache.clear()
+                localProxyCache.clear()
             }
         }
 
