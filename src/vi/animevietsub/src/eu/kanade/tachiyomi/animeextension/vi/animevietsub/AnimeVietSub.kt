@@ -16,6 +16,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.FormBody
 import okhttp3.Headers
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Interceptor
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -44,8 +45,10 @@ class AnimeVietSub : AnimeHttpSource() {
 
     private val json = Json { ignoreUnknownKeys = true }
 
-    // Cache for decrypted m3u8 playlists served via interceptor
-    private val m3u8Cache = ConcurrentHashMap<String, String>()
+    private val baseHost = baseUrl.toHttpUrl().host
+
+    // Cache for decrypted m3u8 playlists served via interceptor.
+    private val m3u8Cache = ConcurrentHashMap<String, CachedPlaylist>()
 
     override val client: OkHttpClient = network.cloudflareClient.newBuilder()
         .addInterceptor(::m3u8Interceptor)
@@ -53,23 +56,34 @@ class AnimeVietSub : AnimeHttpSource() {
 
     private fun m3u8Interceptor(chain: Interceptor.Chain): Response {
         val request = chain.request()
-        val url = request.url.toString()
+        val isInternalM3u8Request =
+            request.url.host == baseHost && request.url.encodedPath.startsWith("/internal-m3u8/")
 
-        // Check if this is a request for a cached m3u8 playlist
-        val prefix = "$baseUrl/internal-m3u8/"
-        if (url.startsWith(prefix)) {
-            val key = url.removePrefix(prefix)
-            val content = m3u8Cache.remove(key)
-            if (content != null) {
+        if (isInternalM3u8Request) {
+            val key = request.url.encodedPath.removePrefix("/internal-m3u8/")
+            val content = m3u8Cache[key]?.content
+
+            if (content == null) {
                 return Response.Builder()
                     .request(request)
                     .protocol(okhttp3.Protocol.HTTP_1_1)
-                    .code(200)
-                    .message("OK")
-                    .body(content.toResponseBody("application/vnd.apple.mpegurl".toMediaType()))
+                    .code(404)
+                    .message("Not Found")
+                    .body("Playlist not found".toResponseBody("text/plain".toMediaType()))
                     .build()
             }
+
+            return Response.Builder()
+                .request(request)
+                .protocol(okhttp3.Protocol.HTTP_1_1)
+                .code(200)
+                .message("OK")
+                .header("Content-Type", "application/vnd.apple.mpegurl")
+                .header("Cache-Control", "no-store")
+                .body(content.toResponseBody("application/vnd.apple.mpegurl".toMediaType()))
+                .build()
         }
+
         return chain.proceed(request)
     }
 
@@ -327,25 +341,56 @@ class AnimeVietSub : AnimeHttpSource() {
     private fun extractVideosFromM3u8(m3u8Content: String, serverName: String): List<Video> {
         val videos = mutableListOf<Video>()
 
+        if (!m3u8Content.contains("#EXTM3U")) {
+            // Some responses can include a direct m3u8 URL wrapped in other text.
+            val directM3u8 = Regex("""https?://[^\s"']+\.m3u8[^\s"']*""")
+                .find(m3u8Content)
+                ?.value
+            if (directM3u8 != null) {
+                return listOf(Video(directM3u8, "$serverName - HLS", directM3u8))
+            }
+        }
+
         // Check if it's a master playlist with multiple qualities
-        val streamRegex = Regex("""#EXT-X-STREAM-INF:.*?RESOLUTION=(\d+x\d+).*?\n(https?://.+)""")
+        val streamRegex = Regex("""#EXT-X-STREAM-INF:[^\r\n]*RESOLUTION=(\d+x\d+)[^\r\n]*\r?\n([^\r\n]+)""")
         val streams = streamRegex.findAll(m3u8Content).toList()
 
         if (streams.isNotEmpty()) {
             for (stream in streams) {
                 val resolution = stream.groupValues[1]
                 val url = stream.groupValues[2].trim()
-                videos.add(Video(url, "$serverName - $resolution", url))
+                if (url.startsWith("http://") || url.startsWith("https://")) {
+                    videos.add(Video(url, "$serverName - $resolution", url))
+                }
             }
-        } else {
+        }
+
+        if (videos.isEmpty()) {
             // Single quality media playlist — serve via interceptor
             val key = "${serverName}-${System.currentTimeMillis()}.m3u8"
-            m3u8Cache[key] = m3u8Content
+            m3u8Cache[key] = CachedPlaylist(m3u8Content)
+            pruneM3u8Cache()
             val fakeUrl = "$baseUrl/internal-m3u8/$key"
             videos.add(Video(fakeUrl, "$serverName - HLS", fakeUrl))
         }
 
         return videos
+    }
+
+    private fun pruneM3u8Cache() {
+        val now = System.currentTimeMillis()
+        val expiredKeys = m3u8Cache.entries
+            .filter { now - it.value.createdAt > M3U8_CACHE_TTL_MS }
+            .map { it.key }
+        expiredKeys.forEach(m3u8Cache::remove)
+
+        if (m3u8Cache.size <= M3U8_CACHE_MAX_SIZE) return
+
+        val keysToRemove = m3u8Cache.entries
+            .sortedBy { it.value.createdAt }
+            .take(m3u8Cache.size - M3U8_CACHE_MAX_SIZE)
+            .map { it.key }
+        keysToRemove.forEach(m3u8Cache::remove)
     }
 
     private suspend fun extractVideosFromEmbed(embedUrl: String, serverName: String): List<Video>? {
@@ -372,6 +417,14 @@ class AnimeVietSub : AnimeHttpSource() {
     }
 
     companion object {
+        private data class CachedPlaylist(
+            val content: String,
+            val createdAt: Long = System.currentTimeMillis(),
+        )
+
+        private const val M3U8_CACHE_TTL_MS = 10 * 60 * 1000L
+        private const val M3U8_CACHE_MAX_SIZE = 32
+
         private val AES_KEY = byteArrayOf(
             0x02, 0x56, 0x94.toByte(), 0x68, 0x64, 0xdc.toByte(), 0xf9.toByte(), 0x96.toByte(),
             0x99.toByte(), 0xa6.toByte(), 0xe2.toByte(), 0x16, 0xfe.toByte(), 0x42, 0x31, 0x4b,
