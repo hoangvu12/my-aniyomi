@@ -215,6 +215,13 @@ class AnimeVietSub : AnimeHttpSource() {
         val serverButtons = epDoc.select("a.btn3dsv[data-href]")
         val errors = mutableListOf<String>()
 
+        if (serverButtons.isEmpty()) {
+            val title = epDoc.selectFirst("title")?.text() ?: "no title"
+            val hasCloudflare = epDoc.html().contains("cloudflare", ignoreCase = true)
+            val bodyLen = epDoc.html().length
+            throw Exception("No server buttons found. Page title: $title, CF: $hasCloudflare, len: $bodyLen")
+        }
+
         for (btn in serverButtons) {
             val dataHref = btn.attr("data-href")
             val serverName = btn.text().trim()
