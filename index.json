@@ -2,10 +2,10 @@
   {
     "name": "Aniyomi: anime47.best",
     "pkg": "eu.kanade.tachiyomi.animeextension.vi.anime47best",
-    "apk": "aniyomi-vi-anime47best-v14.2.apk",
+    "apk": "aniyomi-vi-anime47best-v14.3.apk",
     "lang": "vi",
-    "code": 2,
-    "version": "14.2",
+    "code": 3,
+    "version": "14.3",
     "nsfw": 0,
     "sources": [
       {
@@ -13,6 +13,24 @@
         "lang": "vi",
         "id": "3240425807910169699",
         "baseUrl": "https://anime47.best",
+        "versionId": 1
+      }
+    ]
+  },
+  {
+    "name": "Aniyomi: AnimeHay",
+    "pkg": "eu.kanade.tachiyomi.animeextension.vi.animehay",
+    "apk": "aniyomi-vi-animehay-v14.1.apk",
+    "lang": "vi",
+    "code": 1,
+    "version": "14.1",
+    "nsfw": 0,
+    "sources": [
+      {
+        "name": "AnimeHay",
+        "lang": "vi",
+        "id": "9145826723655776440",
+        "baseUrl": "https://animehay.icu",
         "versionId": 1
       }
     ]
