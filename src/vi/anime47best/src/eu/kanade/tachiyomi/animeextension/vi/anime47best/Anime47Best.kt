@@ -46,8 +46,8 @@ class Anime47Best : AnimeHttpSource() {
 
     override fun popularAnimeRequest(page: Int): Request {
         return GET(
-            "$baseUrl/filter?sort=views&page=$page",
-            headers,
+            "$apiUrl/anime/filter?page=$page&sort=views",
+            apiHeaders("$baseUrl/filter?sort=views&page=$page"),
         )
     }
 
@@ -56,8 +56,8 @@ class Anime47Best : AnimeHttpSource() {
     }
 
     override fun latestUpdatesRequest(page: Int): Request = GET(
-        "$baseUrl/filter?sort=latest&page=$page",
-        headers,
+        "$apiUrl/anime/filter?page=$page&sort=latest",
+        apiHeaders("$baseUrl/filter?sort=latest&page=$page"),
     )
 
     override fun latestUpdatesParse(response: Response): AnimesPage = parseAnimesPage(response)
@@ -68,15 +68,20 @@ class Anime47Best : AnimeHttpSource() {
         }
         val encoded = URLEncoder.encode(query, StandardCharsets.UTF_8.toString())
         return GET(
-            "$baseUrl/tim-kiem?q=$encoded&page=$page",
-            headers,
+            "$apiUrl/search/full/?keyword=$encoded&page=$page",
+            apiHeaders("$baseUrl/tim-kiem?q=$encoded&page=$page"),
         )
     }
 
     override fun searchAnimeParse(response: Response): AnimesPage = parseAnimesPage(response)
 
     override fun animeDetailsRequest(anime: SAnime): Request {
-        return GET(baseUrl + anime.url, headers)
+        val animeId = animeIdFromUrl(anime.url)
+            ?: return GET(baseUrl + anime.url, headers)
+        return GET(
+            "$apiUrl/anime/info/$animeId?lang=vi",
+            apiHeaders("$baseUrl${anime.url}"),
+        )
     }
 
     override fun animeDetailsParse(response: Response): SAnime {
