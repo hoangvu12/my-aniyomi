@@ -45,47 +45,68 @@ class Anime47Best : AnimeHttpSource() {
         .add("Origin", baseUrl)
 
     override fun popularAnimeRequest(page: Int): Request {
-        return GET("$baseUrl/filter?sort=latest&page=$page", headers)
+        return GET(
+            "$baseUrl/filter?sort=views&page=$page",
+            headers,
+        )
     }
 
     override fun popularAnimeParse(response: Response): AnimesPage {
-        val document = response.asJsoup()
-        val animes = parseAnimeListFromDocument(document)
-        return AnimesPage(animes, animes.isNotEmpty())
+        return parseAnimesPage(response)
     }
 
-    override fun latestUpdatesRequest(page: Int): Request = popularAnimeRequest(page)
+    override fun latestUpdatesRequest(page: Int): Request = GET(
+        "$baseUrl/filter?sort=latest&page=$page",
+        headers,
+    )
 
-    override fun latestUpdatesParse(response: Response): AnimesPage = popularAnimeParse(response)
+    override fun latestUpdatesParse(response: Response): AnimesPage = parseAnimesPage(response)
 
     override fun searchAnimeRequest(page: Int, query: String, filters: AnimeFilterList): Request {
         if (query.isBlank()) {
             return popularAnimeRequest(page)
         }
         val encoded = URLEncoder.encode(query, StandardCharsets.UTF_8.toString())
-        return GET("$baseUrl/tim-kiem?q=$encoded&page=$page", headers)
+        return GET(
+            "$baseUrl/tim-kiem?q=$encoded&page=$page",
+            headers,
+        )
     }
 
-    override fun searchAnimeParse(response: Response): AnimesPage = popularAnimeParse(response)
+    override fun searchAnimeParse(response: Response): AnimesPage = parseAnimesPage(response)
+
+    override fun animeDetailsRequest(anime: SAnime): Request {
+        return GET(baseUrl + anime.url, headers)
+    }
 
     override fun animeDetailsParse(response: Response): SAnime {
-        val document = response.asJsoup()
-        val info = document.selectFirst("main")?.text().orEmpty()
+        val body = response.body.string()
+        runCatching {
+            val root = json.parseToJsonElement(body) as? JsonObject ?: return@runCatching null
+            val data = root["data"] as? JsonObject ?: root
+            return@runCatching parseAnimeDetailsFromApi(data)
+        }.getOrNull()?.let { return it }
 
+        val document = Jsoup.parse(body, response.request.url.toString())
+        val info = document.selectFirst("main")?.text().orEmpty()
         return SAnime.create().apply {
             title = document.selectFirst("h1")?.text()
                 ?: document.selectFirst("meta[property=og:title]")?.attr("content")
-                ?: ""
-            thumbnail_url = document.selectFirst("meta[property=og:image]")?.attr("content")
-                ?: document.selectFirst("img[src]")?.attr("abs:src")
+                ?: title
+            thumbnail_url = toAbsoluteUrl(
+                document.selectFirst("meta[property=og:image]")?.attr("content")
+                    ?: document.selectFirst("img[src]")?.attr("abs:src"),
+            )
             description = document.selectFirst("meta[name=description]")?.attr("content")
                 ?: document.selectFirst("[itemprop=description]")?.text()
                 ?: document.selectFirst("main")?.selectFirst("p")?.text()
+                ?: description
             genre = document.select("a[href*=the-loai], a[href*=genre], a[href*=tag]")
                 .map { it.text().trim() }
                 .filter { it.isNotBlank() }
                 .distinct()
                 .joinToString()
+                .ifBlank { genre }
             status = parseStatus(info)
         }
     }
@@ -273,26 +294,120 @@ class Anime47Best : AnimeHttpSource() {
         return videos.ifEmpty { listOf(debugVideo("no stream url in watch payload")) }
     }
 
+    private fun parseAnimesPage(response: Response): AnimesPage {
+        val body = response.body.string()
+        parseApiAnimesPage(body)?.let { return it }
+        val document = Jsoup.parse(body, response.request.url.toString())
+        return parseDocumentAnimesPage(document)
+    }
+
+    private fun parseApiAnimesPage(body: String): AnimesPage? {
+        val root = runCatching { json.parseToJsonElement(body) as? JsonObject }
+            .getOrNull()
+            ?: return null
+
+        val data = root["data"] as? JsonObject
+        val posts = data?.get("posts") as? JsonArray
+        if (posts != null) {
+            val animes = posts.mapNotNull { (it as? JsonObject)?.let(::parseApiAnime) }
+            val pagination = data["pagination"] as? JsonObject
+            val currentPage = pagination?.let { firstInt(it, listOf("current_page")) }
+            val lastPage = pagination?.let { firstInt(it, listOf("last_page")) }
+            val hasNextPage = when {
+                currentPage != null && lastPage != null -> currentPage < lastPage
+                else -> animes.size >= 20
+            }
+            return AnimesPage(animes, hasNextPage)
+        }
+
+        val results = root["results"] as? JsonArray
+        if (results != null) {
+            val animes = results.mapNotNull { (it as? JsonObject)?.let(::parseApiAnime) }
+            val hasMore = firstBoolean(root, listOf("has_more"))
+            val currentPage = firstInt(root, listOf("current_page"))
+            val totalPages = firstInt(root, listOf("total_pages"))
+            val hasNextPage = hasMore ?: when {
+                currentPage != null && totalPages != null -> currentPage < totalPages
+                else -> animes.size >= 20
+            }
+            return AnimesPage(animes, hasNextPage)
+        }
+
+        return null
+    }
+
+    private fun parseDocumentAnimesPage(document: Document): AnimesPage {
+        val animes = parseAnimeListFromDocument(document)
+        val hasNextPage = documentHasNextPage(document, animes.size)
+        return AnimesPage(animes, hasNextPage)
+    }
+
+    private fun parseApiAnime(obj: JsonObject): SAnime? {
+        val slug = firstString(obj, listOf("slug"))?.trim()
+        val id = firstInt(obj, listOf("id", "legacy_id"))
+        val link = firstString(obj, listOf("link", "url", "href"))
+
+        val normalizedLink = normalizeToRelativeUrl(link)
+        val relativeUrl = when {
+            !normalizedLink.isNullOrBlank() -> normalizeAnimeInfoPath(normalizedLink)
+            !slug.isNullOrBlank() && id != null -> "/phim/$slug/m$id.html"
+            else -> null
+        } ?: return null
+
+        val title = firstString(obj, listOf("title", "name"))?.trim().orEmpty()
+        val thumbnail = toAbsoluteUrl(
+            firstString(obj, listOf("poster", "image", "thumbnail", "cover", "poster_url")),
+        )
+
+        return SAnime.create().apply {
+            setUrlWithoutDomain(relativeUrl)
+            this.title = title
+            thumbnail_url = thumbnail
+        }
+    }
+
+    private fun parseAnimeDetailsFromApi(data: JsonObject): SAnime {
+        return SAnime.create().apply {
+            title = firstString(data, listOf("title", "name")).orEmpty()
+            thumbnail_url = toAbsoluteUrl(firstString(data, listOf("poster", "image", "thumbnail", "cover")))
+            description = firstString(data, listOf("description", "synopsis"))
+            genre = ((data["genres"] as? JsonArray).orEmpty())
+                .mapNotNull { it as? JsonObject }
+                .mapNotNull { firstString(it, listOf("name", "title"))?.trim() }
+                .filter { it.isNotBlank() }
+                .distinct()
+                .joinToString()
+            status = parseStatus(firstString(data, listOf("status")).orEmpty())
+        }
+    }
+
     private fun parseAnimeListFromDocument(document: Document): List<SAnime> {
         val animes = linkedMapOf<String, SAnime>()
 
-        document.select("a[href*=/phim/][href*=/m][href$=.html]").forEach { link ->
-            val href = normalizeToRelativeUrl(link.attr("href")) ?: return@forEach
+        document.select("a[href*=/phim/], a[href*=/thong-tin/]").forEach { link ->
+            val rawHref = normalizeToRelativeUrl(link.attr("href")) ?: return@forEach
+            val href = normalizeAnimeInfoPath(rawHref) ?: return@forEach
             val anime = SAnime.create().apply {
                 setUrlWithoutDomain(href)
                 title = link.attr("title").ifBlank {
-                    link.text().ifBlank { link.selectFirst("img")?.attr("alt") ?: "" }
+                    link.selectFirst("h1, h2, h3, h4, h5")?.text()
+                        ?.ifBlank { link.text() }
+                        ?.ifBlank { link.selectFirst("img")?.attr("alt") ?: "" }
+                        ?: ""
                 }
-                thumbnail_url = link.selectFirst("img")?.attr("abs:src")
+                thumbnail_url = toAbsoluteUrl(
+                    link.selectFirst("img")?.attr("abs:src")
+                        ?: link.selectFirst("img")?.attr("src"),
+                )
             }
             animes.putIfAbsent(href, anime)
         }
 
         if (animes.isEmpty()) {
             val html = document.html()
-            val regex = Regex("""/phim/[a-zA-Z0-9\-]+/m\d+\.html""")
+            val regex = Regex("""/phim/[a-zA-Z0-9\-]+/m\d+\.html|/thong-tin/[a-zA-Z0-9\-]+-\d+(?:\.html)?""")
             regex.findAll(html).forEach { match ->
-                val href = match.value
+                val href = normalizeAnimeInfoPath(match.value) ?: return@forEach
                 if (!animes.containsKey(href)) {
                     val slug = Regex("""/phim/([a-zA-Z0-9\-]+)/m\d+\.html""")
                         .find(href)
@@ -309,6 +424,22 @@ class Anime47Best : AnimeHttpSource() {
         }
 
         return animes.values.toList()
+    }
+
+    private fun documentHasNextPage(document: Document, count: Int): Boolean {
+        if (document.select("a[rel=next], link[rel=next]").isNotEmpty()) return true
+        if (document.select("a[aria-label*=Trang tiếp theo], button[aria-label*=Trang tiếp theo]:not([disabled])").isNotEmpty()) return true
+
+        val pageText = document.text().replace('\u00A0', ' ')
+        val resultRange = Regex("""Hiển thị\s*(\d+)\s*[–-]\s*(\d+)\s*trong\s*(\d+)\s*kết quả""")
+            .find(pageText)
+        if (resultRange != null) {
+            val shownEnd = resultRange.groupValues.getOrNull(2)?.toIntOrNull() ?: 0
+            val total = resultRange.groupValues.getOrNull(3)?.toIntOrNull() ?: 0
+            return shownEnd in 1 until total
+        }
+
+        return count >= 20
     }
 
     private fun createEpisodeFromWatchUrl(relativeUrl: String): SEpisode {
@@ -398,6 +529,39 @@ class Anime47Best : AnimeHttpSource() {
             url.startsWith("/") -> url
             url.startsWith("http://") || url.startsWith("https://") -> null
             else -> "/$url"
+        }
+    }
+
+    private fun animeIdFromUrl(url: String?): String? {
+        if (url.isNullOrBlank()) return null
+        return Regex("""/m(\d+)\.html""").find(url)?.groupValues?.get(1)
+    }
+
+    private fun normalizeAnimeInfoPath(url: String?): String? {
+        if (url.isNullOrBlank()) return null
+
+        Regex("""^/phim/[a-zA-Z0-9\-]+/m\d+\.html$""")
+            .find(url)
+            ?.let { return it.value }
+
+        val infoMatch = Regex("""^/thong-tin/([a-zA-Z0-9\-]+)-(\d+)(?:\.html)?$""")
+            .find(url)
+        if (infoMatch != null) {
+            val slug = infoMatch.groupValues[1]
+            val id = infoMatch.groupValues[2]
+            return "/phim/$slug/m$id.html"
+        }
+
+        return null
+    }
+
+    private fun toAbsoluteUrl(url: String?): String? {
+        if (url.isNullOrBlank()) return null
+        return when {
+            url.startsWith("http://") || url.startsWith("https://") -> url
+            url.startsWith("//") -> "https:$url"
+            url.startsWith("/") -> "$baseUrl$url"
+            else -> url
         }
     }
 
@@ -523,6 +687,17 @@ class Anime47Best : AnimeHttpSource() {
         for (key in keys) {
             val value = obj[key] as? JsonPrimitive ?: continue
             value.contentOrNull?.toIntOrNull()?.let { return it }
+        }
+        return null
+    }
+
+    private fun firstBoolean(obj: JsonObject, keys: List<String>): Boolean? {
+        for (key in keys) {
+            val value = obj[key] as? JsonPrimitive ?: continue
+            when (value.contentOrNull?.trim()?.lowercase()) {
+                "true", "1", "yes" -> return true
+                "false", "0", "no" -> return false
+            }
         }
         return null
     }
