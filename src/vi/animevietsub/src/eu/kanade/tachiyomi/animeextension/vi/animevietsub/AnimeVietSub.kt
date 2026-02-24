@@ -625,19 +625,24 @@ class AnimeVietSub : AnimeHttpSource() {
                         append("Connection: close\r\n")
                         append("\r\n")
                     }
-                    output.write(headers.toByteArray(Charsets.US_ASCII))
+                    try {
+                        output.write(headers.toByteArray(Charsets.US_ASCII))
 
-                    if (method == "GET" && body != null) {
-                        body.byteStream().use { input ->
-                            val buffer = ByteArray(16 * 1024)
-                            while (true) {
-                                val read = input.read(buffer)
-                                if (read <= 0) break
-                                output.write(buffer, 0, read)
+                        if (method == "GET" && body != null) {
+                            body.byteStream().use { input ->
+                                val buffer = ByteArray(16 * 1024)
+                                while (true) {
+                                    val read = input.read(buffer)
+                                    if (read <= 0) break
+                                    output.write(buffer, 0, read)
+                                }
                             }
                         }
+                        output.flush()
+                    } catch (_: Exception) {
+                        // Player closed the socket (seek/cancel), which is expected.
+                        return
                     }
-                    output.flush()
                 }
             } catch (_: Exception) {
                 writeHttpResponse(output, 502, "Bad Gateway", "Proxy request failed".toByteArray())
@@ -660,9 +665,13 @@ class AnimeVietSub : AnimeHttpSource() {
                 append("Connection: close\r\n")
                 append("\r\n")
             }
-            output.write(headers.toByteArray(Charsets.US_ASCII))
-            if (writeBody && body.isNotEmpty()) output.write(body)
-            output.flush()
+            try {
+                output.write(headers.toByteArray(Charsets.US_ASCII))
+                if (writeBody && body.isNotEmpty()) output.write(body)
+                output.flush()
+            } catch (_: Exception) {
+                // Ignore disconnects from canceled player requests.
+            }
         }
 
         private fun pruneLocalM3u8Cache() {
