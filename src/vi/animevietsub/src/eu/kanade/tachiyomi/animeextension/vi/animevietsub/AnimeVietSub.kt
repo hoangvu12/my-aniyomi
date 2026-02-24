@@ -219,7 +219,11 @@ class AnimeVietSub : AnimeHttpSource() {
             val title = epDoc.selectFirst("title")?.text() ?: "no title"
             val hasCloudflare = epDoc.html().contains("cloudflare", ignoreCase = true)
             val bodyLen = epDoc.html().length
-            throw Exception("No server buttons found. Page title: $title, CF: $hasCloudflare, len: $bodyLen")
+            return listOf(Video(
+                "$baseUrl/debug",
+                "DEBUG: 0 buttons | title=$title | CF=$hasCloudflare | len=$bodyLen",
+                "$baseUrl/debug",
+            ))
         }
 
         for (btn in serverButtons) {
@@ -290,8 +294,17 @@ class AnimeVietSub : AnimeHttpSource() {
             }
         }
 
-        if (videos.isEmpty() && errors.isNotEmpty()) {
-            throw Exception("No streams: ${errors.joinToString("; ")}")
+        if (videos.isEmpty()) {
+            val errMsg = if (errors.isNotEmpty()) {
+                errors.joinToString("; ")
+            } else {
+                "no errors but no videos either"
+            }
+            return listOf(Video(
+                "$baseUrl/debug",
+                "DEBUG: $errMsg",
+                "$baseUrl/debug",
+            ))
         }
 
         return videos

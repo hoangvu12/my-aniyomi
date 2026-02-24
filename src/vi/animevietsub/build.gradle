@@ -1,7 +1,7 @@
 ext {
     extName = 'AnimeVietSub'
     extClass = '.AnimeVietSub'
-    extVersionCode = 4
+    extVersionCode = 5
     isNsfw = false
 }
 
