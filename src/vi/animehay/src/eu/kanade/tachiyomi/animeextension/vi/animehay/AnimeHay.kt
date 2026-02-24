@@ -275,7 +275,7 @@ class AnimeHay : AnimeHttpSource() {
             }
         }
 
-        return videosByUrl.values.ifEmpty {
+        return videosByUrl.values.toList().ifEmpty {
             listOf(Video("$baseUrl/debug", "DEBUG: no video found", "$baseUrl/debug"))
         }
     }
