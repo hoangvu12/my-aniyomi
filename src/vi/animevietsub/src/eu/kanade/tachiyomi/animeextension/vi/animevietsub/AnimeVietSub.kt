@@ -16,22 +16,28 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.FormBody
 import okhttp3.Headers
-import okhttp3.HttpUrl.Companion.toHttpUrl
-import okhttp3.Interceptor
-import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
-import okhttp3.ResponseBody.Companion.toResponseBody
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.parser.Parser
+import java.io.BufferedReader
 import java.io.ByteArrayOutputStream
+import java.io.InputStreamReader
+import java.io.OutputStream
+import java.net.InetAddress
+import java.net.InetSocketAddress
+import java.net.ServerSocket
+import java.net.Socket
+import java.net.SocketException
 import java.util.concurrent.ConcurrentHashMap
+import java.util.UUID
 import java.util.zip.Inflater
 import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
+import kotlin.concurrent.thread
 
 class AnimeVietSub : AnimeHttpSource() {
 
@@ -45,47 +51,7 @@ class AnimeVietSub : AnimeHttpSource() {
 
     private val json = Json { ignoreUnknownKeys = true }
 
-    private val baseHost = baseUrl.toHttpUrl().host
-
-    // Cache for decrypted m3u8 playlists served via interceptor.
-    private val m3u8Cache = ConcurrentHashMap<String, CachedPlaylist>()
-
-    override val client: OkHttpClient = network.cloudflareClient.newBuilder()
-        .addInterceptor(::m3u8Interceptor)
-        .build()
-
-    private fun m3u8Interceptor(chain: Interceptor.Chain): Response {
-        val request = chain.request()
-        val isInternalM3u8Request =
-            request.url.host == baseHost && request.url.encodedPath.startsWith("/internal-m3u8/")
-
-        if (isInternalM3u8Request) {
-            val key = request.url.encodedPath.removePrefix("/internal-m3u8/")
-            val content = m3u8Cache[key]?.content
-
-            if (content == null) {
-                return Response.Builder()
-                    .request(request)
-                    .protocol(okhttp3.Protocol.HTTP_1_1)
-                    .code(404)
-                    .message("Not Found")
-                    .body("Playlist not found".toResponseBody("text/plain".toMediaType()))
-                    .build()
-            }
-
-            return Response.Builder()
-                .request(request)
-                .protocol(okhttp3.Protocol.HTTP_1_1)
-                .code(200)
-                .message("OK")
-                .header("Content-Type", "application/vnd.apple.mpegurl")
-                .header("Cache-Control", "no-store")
-                .body(content.toResponseBody("application/vnd.apple.mpegurl".toMediaType()))
-                .build()
-        }
-
-        return chain.proceed(request)
-    }
+    override val client: OkHttpClient = network.cloudflareClient
 
     override fun headersBuilder(): Headers.Builder = super.headersBuilder()
         .add("Referer", "$baseUrl/")
@@ -366,31 +332,14 @@ class AnimeVietSub : AnimeHttpSource() {
         }
 
         if (videos.isEmpty()) {
-            // Single quality media playlist — serve via interceptor
-            val key = "${serverName}-${System.currentTimeMillis()}.m3u8"
-            m3u8Cache[key] = CachedPlaylist(m3u8Content)
-            pruneM3u8Cache()
-            val fakeUrl = "$baseUrl/internal-m3u8/$key"
-            videos.add(Video(fakeUrl, "$serverName - HLS", fakeUrl))
+            // Single quality media playlist — serve via localhost server.
+            val localUrl = cacheM3u8AndBuildLocalUrl(m3u8Content)
+            if (localUrl != null) {
+                videos.add(Video(localUrl, "$serverName - HLS", localUrl))
+            }
         }
 
         return videos
-    }
-
-    private fun pruneM3u8Cache() {
-        val now = System.currentTimeMillis()
-        val expiredKeys = m3u8Cache.entries
-            .filter { now - it.value.createdAt > M3U8_CACHE_TTL_MS }
-            .map { it.key }
-        expiredKeys.forEach(m3u8Cache::remove)
-
-        if (m3u8Cache.size <= M3U8_CACHE_MAX_SIZE) return
-
-        val keysToRemove = m3u8Cache.entries
-            .sortedBy { it.value.createdAt }
-            .take(m3u8Cache.size - M3U8_CACHE_MAX_SIZE)
-            .map { it.key }
-        keysToRemove.forEach(m3u8Cache::remove)
     }
 
     private suspend fun extractVideosFromEmbed(embedUrl: String, serverName: String): List<Video>? {
@@ -417,10 +366,155 @@ class AnimeVietSub : AnimeHttpSource() {
     }
 
     companion object {
+        private val localM3u8Cache = ConcurrentHashMap<String, CachedPlaylist>()
+        private val localServerLock = Any()
+        @Volatile private var localServerSocket: ServerSocket? = null
+        @Volatile private var localServerPort: Int = -1
+        @Volatile private var localServerThread: Thread? = null
+
         private data class CachedPlaylist(
             val content: String,
             val createdAt: Long = System.currentTimeMillis(),
         )
+
+        private fun cacheM3u8AndBuildLocalUrl(content: String): String? {
+            val port = ensureLocalServerStarted() ?: return null
+            val key = "${System.currentTimeMillis()}-${UUID.randomUUID()}.m3u8"
+            localM3u8Cache[key] = CachedPlaylist(content)
+            pruneLocalM3u8Cache()
+            return "http://127.0.0.1:$port/m3u8/$key"
+        }
+
+        private fun ensureLocalServerStarted(): Int? {
+            synchronized(localServerLock) {
+                val socket = localServerSocket
+                if (socket != null && !socket.isClosed && localServerPort > 0) {
+                    return localServerPort
+                }
+
+                return try {
+                    val server = ServerSocket().apply {
+                        reuseAddress = true
+                        bind(InetSocketAddress(InetAddress.getByName("127.0.0.1"), 0))
+                    }
+                    localServerSocket = server
+                    localServerPort = server.localPort
+                    localServerThread = thread(
+                        name = "AnimeVietSub-M3U8Server",
+                        isDaemon = true,
+                    ) {
+                        runLocalServer(server)
+                    }
+                    localServerPort
+                } catch (_: Exception) {
+                    null
+                }
+            }
+        }
+
+        private fun runLocalServer(server: ServerSocket) {
+            while (!server.isClosed) {
+                try {
+                    val socket = server.accept()
+                    thread(
+                        name = "AnimeVietSub-M3U8Client",
+                        isDaemon = true,
+                    ) {
+                        handleLocalRequest(socket)
+                    }
+                } catch (_: SocketException) {
+                    break
+                } catch (_: Exception) {
+                    // Keep serving after transient failures.
+                }
+            }
+        }
+
+        private fun handleLocalRequest(socket: Socket) {
+            socket.use { client ->
+                client.soTimeout = 10_000
+                val reader = BufferedReader(InputStreamReader(client.getInputStream(), Charsets.US_ASCII))
+                val output = client.getOutputStream()
+
+                val requestLine = reader.readLine() ?: return
+                while (true) {
+                    val headerLine = reader.readLine() ?: break
+                    if (headerLine.isEmpty()) break
+                }
+
+                val parts = requestLine.split(" ")
+                if (parts.size < 2) {
+                    writeHttpResponse(output, 400, "Bad Request", "Bad request".toByteArray())
+                    return
+                }
+
+                val method = parts[0]
+                val target = parts[1].substringBefore('?')
+                if (method != "GET" && method != "HEAD") {
+                    writeHttpResponse(output, 405, "Method Not Allowed", ByteArray(0))
+                    return
+                }
+
+                val key = target.removePrefix("/m3u8/")
+                if (!target.startsWith("/m3u8/") || key.isBlank()) {
+                    writeHttpResponse(output, 404, "Not Found", "Not found".toByteArray())
+                    return
+                }
+
+                val playlist = localM3u8Cache[key]?.content
+                if (playlist == null) {
+                    writeHttpResponse(output, 404, "Not Found", "Playlist expired".toByteArray())
+                    return
+                }
+
+                val body = playlist.toByteArray(Charsets.UTF_8)
+                writeHttpResponse(
+                    output = output,
+                    code = 200,
+                    message = "OK",
+                    body = body,
+                    contentType = "application/vnd.apple.mpegurl; charset=utf-8",
+                    writeBody = method == "GET",
+                )
+            }
+        }
+
+        private fun writeHttpResponse(
+            output: OutputStream,
+            code: Int,
+            message: String,
+            body: ByteArray,
+            contentType: String = "text/plain; charset=utf-8",
+            writeBody: Boolean = true,
+        ) {
+            val headers = buildString {
+                append("HTTP/1.1 ").append(code).append(' ').append(message).append("\r\n")
+                append("Content-Type: ").append(contentType).append("\r\n")
+                append("Content-Length: ").append(body.size).append("\r\n")
+                append("Cache-Control: no-store\r\n")
+                append("Connection: close\r\n")
+                append("\r\n")
+            }
+            output.write(headers.toByteArray(Charsets.US_ASCII))
+            if (writeBody && body.isNotEmpty()) output.write(body)
+            output.flush()
+        }
+
+        private fun pruneLocalM3u8Cache() {
+            val now = System.currentTimeMillis()
+            val expiredKeys = localM3u8Cache.entries
+                .filter { now - it.value.createdAt > M3U8_CACHE_TTL_MS }
+                .map { it.key }
+            expiredKeys.forEach(localM3u8Cache::remove)
+
+            if (localM3u8Cache.size <= M3U8_CACHE_MAX_SIZE) return
+
+            val keysToRemove = localM3u8Cache.entries
+                .sortedBy { it.value.createdAt }
+                .take(localM3u8Cache.size - M3U8_CACHE_MAX_SIZE)
+                .map { it.key }
+            keysToRemove.forEach(localM3u8Cache::remove)
+        }
 
         private const val M3U8_CACHE_TTL_MS = 10 * 60 * 1000L
         private const val M3U8_CACHE_MAX_SIZE = 32
