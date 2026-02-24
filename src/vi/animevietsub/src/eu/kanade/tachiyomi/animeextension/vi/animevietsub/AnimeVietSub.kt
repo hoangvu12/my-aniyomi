@@ -21,6 +21,7 @@ import okhttp3.Request
 import okhttp3.Response
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
+import org.jsoup.nodes.Element
 import org.jsoup.parser.Parser
 import java.io.BufferedReader
 import java.io.ByteArrayOutputStream
@@ -134,13 +135,9 @@ class AnimeVietSub : AnimeHttpSource() {
 
         val filmId = Regex("""-a(\d+)/?$""").find(anime.url)?.groupValues?.get(1)
 
-        val episodes = detailDoc.select("ul.list-episode a.btn-episode").map { el ->
-            SEpisode.create().apply {
-                setUrlWithoutDomain(el.attr("href"))
-                name = el.attr("title").ifBlank { "Tập ${el.text().trim()}" }
-                episode_number = el.text().trim().toFloatOrNull() ?: 0f
-            }
-        }.toMutableList()
+        val episodes = detailDoc.select("ul.list-episode a.btn-episode")
+            .map { parseEpisodeElement(it) }
+            .toMutableList()
 
         if (episodes.isEmpty()) {
             val firstEpLink = detailDoc.selectFirst("a[href*=tap-], a.btn-episode")
@@ -152,13 +149,8 @@ class AnimeVietSub : AnimeHttpSource() {
                 ).awaitSuccess().asJsoup()
 
                 episodes.addAll(
-                    epDoc.select("ul.list-episode a.btn-episode").map { el ->
-                        SEpisode.create().apply {
-                            setUrlWithoutDomain(el.attr("href"))
-                            name = el.attr("title").ifBlank { "Tập ${el.text().trim()}" }
-                            episode_number = el.text().trim().toFloatOrNull() ?: 0f
-                        }
-                    },
+                    epDoc.select("ul.list-episode a.btn-episode")
+                        .map { parseEpisodeElement(it) },
                 )
             }
 
@@ -169,19 +161,155 @@ class AnimeVietSub : AnimeHttpSource() {
                 val rssDoc = Jsoup.parse(ajaxResp.body.string(), "", Parser.xmlParser())
                 episodes.addAll(
                     rssDoc.select("item").map { item ->
-                        SEpisode.create().apply {
-                            val link = item.selectFirst("link")?.text() ?: ""
-                            setUrlWithoutDomain(link.removePrefix(baseUrl))
-                            name = item.selectFirst("title")?.text() ?: ""
-                            val epNum = Regex("""(\d+)""").find(name)?.value
-                            episode_number = epNum?.toFloatOrNull() ?: 0f
-                        }
+                        val link = item.selectFirst("link")?.text() ?: ""
+                        val title = item.selectFirst("title")?.text() ?: ""
+                        val episodeToken = extractEpisodeToken(
+                            href = link,
+                            displayText = title,
+                            titleText = title,
+                        )
+                        val sortKey = parseEpisodeSortKey(episodeToken)
+
+                        ParsedEpisode(
+                            episode = SEpisode.create().apply {
+                                setUrlWithoutDomain(link.removePrefix(baseUrl))
+                                name = title
+                                episode_number = sortKey.toEpisodeNumber()
+                            },
+                            sortKey = sortKey,
+                        )
                     },
                 )
             }
         }
 
-        return episodes.reversed()
+        return episodes.sortedByDescending { it.sortKey }
+            .map { it.episode }
+    }
+
+    private fun parseEpisodeElement(element: Element): ParsedEpisode {
+        val href = element.attr("href")
+        val displayText = element.text().trim()
+        val titleText = element.attr("title")
+        val episodeToken = extractEpisodeToken(
+            href = href,
+            displayText = displayText,
+            titleText = titleText,
+        )
+        val sortKey = parseEpisodeSortKey(episodeToken)
+
+        return ParsedEpisode(
+            episode = SEpisode.create().apply {
+                setUrlWithoutDomain(href)
+                name = titleText.ifBlank { "Tập $displayText" }
+                episode_number = sortKey.toEpisodeNumber()
+            },
+            sortKey = sortKey,
+        )
+    }
+
+    private fun extractEpisodeToken(
+        href: String,
+        displayText: String,
+        titleText: String,
+    ): String {
+        extractEpisodeTokenFromHref(href)?.let { return it }
+        extractEpisodeTokenFromText(displayText)?.let { return it }
+        extractEpisodeTokenFromText(titleText)?.let { return it }
+        return displayText.ifBlank { titleText }.trim()
+    }
+
+    private fun extractEpisodeTokenFromHref(href: String): String? {
+        val slug = href.substringAfterLast("/")
+            .substringBefore("?")
+            .substringBefore("#")
+            .substringBefore(".html")
+
+        if (!slug.startsWith("tap-")) return null
+
+        val rawToken = slug.removePrefix("tap-")
+        val parts = rawToken.split('-')
+        if (parts.size <= 1) return rawToken
+
+        return if (parts.last().all(Char::isDigit)) {
+            parts.dropLast(1).joinToString("-")
+        } else {
+            rawToken
+        }
+    }
+
+    private fun extractEpisodeTokenFromText(text: String): String? {
+        val normalized = text.trim().lowercase()
+        if (normalized.isBlank()) return null
+        return EPISODE_TOKEN_REGEX.find(normalized)?.value
+    }
+
+    private fun parseEpisodeSortKey(rawToken: String): EpisodeSortKey {
+        val token = rawToken.trim().lowercase()
+
+        PART_EPISODE_REGEX.matchEntire(token)?.let { match ->
+            val base = match.groupValues[1].toDoubleOrNull() ?: 0.0
+            val part = match.groupValues[2].toDoubleOrNull() ?: 0.0
+            return EpisodeSortKey(base = base, variantType = 1, variantValue = part, rawToken = token)
+        }
+
+        RANGE_EPISODE_REGEX.matchEntire(token)?.let {
+            val numbers = token.split('-').mapNotNull { value -> value.toDoubleOrNull() }
+            val base = numbers.firstOrNull() ?: 0.0
+            val tail = numbers.lastOrNull() ?: base
+            return EpisodeSortKey(base = base, variantType = 2, variantValue = tail, rawToken = token)
+        }
+
+        END_EPISODE_REGEX.matchEntire(token)?.let { match ->
+            val base = match.groupValues[1].toDoubleOrNull() ?: 0.0
+            return EpisodeSortKey(base = base, variantType = 3, variantValue = Double.MAX_VALUE, rawToken = token)
+        }
+
+        if (PLAIN_EPISODE_REGEX.matchEntire(token) != null) {
+            return EpisodeSortKey(
+                base = token.toDoubleOrNull() ?: 0.0,
+                variantType = 0,
+                variantValue = 0.0,
+                rawToken = token,
+            )
+        }
+
+        val base = FIRST_NUMBER_REGEX.find(token)?.value?.toDoubleOrNull() ?: -1.0
+        return EpisodeSortKey(base = base, variantType = 4, variantValue = 0.0, rawToken = token)
+    }
+
+    private data class ParsedEpisode(
+        val episode: SEpisode,
+        val sortKey: EpisodeSortKey,
+    )
+
+    private data class EpisodeSortKey(
+        val base: Double,
+        val variantType: Int,
+        val variantValue: Double,
+        val rawToken: String,
+    ) : Comparable<EpisodeSortKey> {
+        override fun compareTo(other: EpisodeSortKey): Int {
+            return compareValuesBy(
+                this,
+                other,
+                EpisodeSortKey::base,
+                EpisodeSortKey::variantType,
+                EpisodeSortKey::variantValue,
+                EpisodeSortKey::rawToken,
+            )
+        }
+
+        fun toEpisodeNumber(): Float {
+            if (base < 0) return 0f
+            val fractional = when (variantType) {
+                1 -> (variantValue.coerceIn(0.0, 999.0) / 1000.0)
+                2 -> 0.9
+                3 -> 0.99
+                else -> 0.0
+            }
+            return (base + fractional).toFloat()
+        }
     }
 
     // ============================ Video URLs =============================
@@ -380,6 +508,13 @@ class AnimeVietSub : AnimeHttpSource() {
     }
 
     companion object {
+        private val FIRST_NUMBER_REGEX = Regex("""\d+(?:\.\d+)?""")
+        private val PLAIN_EPISODE_REGEX = Regex("""^\d+(?:\.\d+)?$""")
+        private val PART_EPISODE_REGEX = Regex("""^(\d+(?:\.\d+)?)_(\d+(?:\.\d+)?)$""")
+        private val RANGE_EPISODE_REGEX = Regex("""^\d+(?:\.\d+)?(?:-\d+(?:\.\d+)?)+$""")
+        private val END_EPISODE_REGEX = Regex("""^(\d+(?:\.\d+)?)[_-]end$""")
+        private val EPISODE_TOKEN_REGEX = Regex("""\d+(?:[_-](?:\d+|end))*""")
+
         init {
             try {
                 Runtime.getRuntime().addShutdownHook(
