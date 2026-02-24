@@ -20,10 +20,10 @@
   {
     "name": "Aniyomi: AnimeVietSub",
     "pkg": "eu.kanade.tachiyomi.animeextension.vi.animevietsub",
-    "apk": "aniyomi-vi-animevietsub-v14.12.apk",
+    "apk": "aniyomi-vi-animevietsub-v14.13.apk",
     "lang": "vi",
-    "code": 12,
-    "version": "14.12",
+    "code": 13,
+    "version": "14.13",
     "nsfw": 0,
     "sources": [
       {
@@ -31,6 +31,24 @@
         "lang": "vi",
         "id": "8403388926739991946",
         "baseUrl": "https://animevietsub.be",
+        "versionId": 1
+      }
+    ]
+  },
+  {
+    "name": "Aniyomi: KKPhim",
+    "pkg": "eu.kanade.tachiyomi.animeextension.vi.kkphim",
+    "apk": "aniyomi-vi-kkphim-v14.1.apk",
+    "lang": "vi",
+    "code": 1,
+    "version": "14.1",
+    "nsfw": 0,
+    "sources": [
+      {
+        "name": "KKPhim",
+        "lang": "vi",
+        "id": "6404537046866279871",
+        "baseUrl": "https://phimapi.com",
         "versionId": 1
       }
     ]
