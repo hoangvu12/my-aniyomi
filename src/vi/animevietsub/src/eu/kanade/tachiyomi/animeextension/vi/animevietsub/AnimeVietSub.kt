@@ -248,7 +248,12 @@ class AnimeVietSub : AnimeHttpSource() {
                                 errors.add("decrypt failed")
                                 continue
                             }
-                            videos.addAll(extractVideosFromM3u8(m3u8Content, "AnimeVietSub"))
+                            videos.addAll(
+                                extractVideosFromM3u8(
+                                    m3u8Content = m3u8Content,
+                                    serverName = "AnimeVietSub",
+                                ),
+                            )
                         }
                     } else if (playTech == "embed") {
                         val embedUrl = linkElement.jsonPrimitive.content
@@ -332,10 +337,19 @@ class AnimeVietSub : AnimeHttpSource() {
         }
 
         if (videos.isEmpty()) {
-            // Single quality media playlist — serve via localhost server.
-            val localUrl = cacheM3u8AndBuildLocalUrl(m3u8Content)
+            // Single quality media playlist — serve via localhost server and proxy segments.
+            val streamHeaders = headersBuilder()
+                .set("Referer", "$baseUrl/")
+                .set("Origin", baseUrl)
+                .set("Accept", "*/*")
+                .build()
+            val localUrl = cacheM3u8AndBuildLocalUrl(
+                content = m3u8Content,
+                proxyClient = client,
+                proxyHeaders = streamHeaders,
+            )
             if (localUrl != null) {
-                videos.add(Video(localUrl, "$serverName - HLS", localUrl))
+                videos.add(Video(localUrl, "$serverName - HLS", localUrl, streamHeaders))
             }
         }
 
@@ -367,22 +381,78 @@ class AnimeVietSub : AnimeHttpSource() {
 
     companion object {
         private val localM3u8Cache = ConcurrentHashMap<String, CachedPlaylist>()
+        private val localProxyCache = ConcurrentHashMap<String, ProxiedResource>()
         private val localServerLock = Any()
         @Volatile private var localServerSocket: ServerSocket? = null
         @Volatile private var localServerPort: Int = -1
         @Volatile private var localServerThread: Thread? = null
+        @Volatile private var localProxyClient: OkHttpClient? = null
 
         private data class CachedPlaylist(
             val content: String,
             val createdAt: Long = System.currentTimeMillis(),
         )
 
-        private fun cacheM3u8AndBuildLocalUrl(content: String): String? {
+        private data class ProxiedResource(
+            val url: String,
+            val headers: Headers,
+            val createdAt: Long = System.currentTimeMillis(),
+        )
+
+        private fun cacheM3u8AndBuildLocalUrl(
+            content: String,
+            proxyClient: OkHttpClient,
+            proxyHeaders: Headers,
+        ): String? {
             val port = ensureLocalServerStarted() ?: return null
+            localProxyClient = proxyClient
+
+            val rewritten = rewritePlaylistForProxy(
+                playlist = content,
+                port = port,
+                headers = proxyHeaders,
+            )
             val key = "${System.currentTimeMillis()}-${UUID.randomUUID()}.m3u8"
-            localM3u8Cache[key] = CachedPlaylist(content)
+            localM3u8Cache[key] = CachedPlaylist(rewritten)
             pruneLocalM3u8Cache()
             return "http://127.0.0.1:$port/m3u8/$key"
+        }
+
+        private fun rewritePlaylistForProxy(
+            playlist: String,
+            port: Int,
+            headers: Headers,
+        ): String {
+            val uriRegex = Regex("""URI="(https?://[^"]+)"""")
+            val output = StringBuilder(playlist.length + 1024)
+
+            playlist.lineSequence().forEach { rawLine ->
+                val line = rawLine.trim()
+                val rewrittenLine = when {
+                    line.startsWith("http://") || line.startsWith("https://") -> {
+                        buildProxyUrl(line, headers, port)
+                    }
+                    line.startsWith("#") && line.contains("URI=\"http") -> {
+                        uriRegex.replace(rawLine) { match ->
+                            val url = match.groupValues[1]
+                            """URI="${buildProxyUrl(url, headers, port)}""""
+                        }
+                    }
+                    else -> rawLine
+                }
+
+                output.append(rewrittenLine).append('\n')
+            }
+            return output.toString()
+        }
+
+        private fun buildProxyUrl(url: String, headers: Headers, port: Int): String {
+            val token = UUID.randomUUID().toString()
+            localProxyCache[token] = ProxiedResource(
+                url = url,
+                headers = headers,
+            )
+            return "http://127.0.0.1:$port/proxy/$token"
         }
 
         private fun ensureLocalServerStarted(): Int? {
@@ -437,10 +507,6 @@ class AnimeVietSub : AnimeHttpSource() {
                 val output = client.getOutputStream()
 
                 val requestLine = reader.readLine() ?: return
-                while (true) {
-                    val headerLine = reader.readLine() ?: break
-                    if (headerLine.isEmpty()) break
-                }
 
                 val parts = requestLine.split(" ")
                 if (parts.size < 2) {
@@ -450,32 +516,131 @@ class AnimeVietSub : AnimeHttpSource() {
 
                 val method = parts[0]
                 val target = parts[1].substringBefore('?')
+
+                val requestHeaders = mutableMapOf<String, String>()
+                while (true) {
+                    val headerLine = reader.readLine() ?: break
+                    if (headerLine.isEmpty()) break
+                    val splitAt = headerLine.indexOf(':')
+                    if (splitAt > 0) {
+                        val key = headerLine.substring(0, splitAt).trim().lowercase()
+                        val value = headerLine.substring(splitAt + 1).trim()
+                        requestHeaders[key] = value
+                    }
+                }
+
                 if (method != "GET" && method != "HEAD") {
                     writeHttpResponse(output, 405, "Method Not Allowed", ByteArray(0))
                     return
                 }
 
-                val key = target.removePrefix("/m3u8/")
-                if (!target.startsWith("/m3u8/") || key.isBlank()) {
-                    writeHttpResponse(output, 404, "Not Found", "Not found".toByteArray())
+                if (target.startsWith("/m3u8/")) {
+                    val key = target.removePrefix("/m3u8/")
+                    if (key.isBlank()) {
+                        writeHttpResponse(output, 404, "Not Found", "Not found".toByteArray())
+                        return
+                    }
+
+                    val playlist = localM3u8Cache[key]?.content
+                    if (playlist == null) {
+                        writeHttpResponse(output, 404, "Not Found", "Playlist expired".toByteArray())
+                        return
+                    }
+
+                    val body = playlist.toByteArray(Charsets.UTF_8)
+                    writeHttpResponse(
+                        output = output,
+                        code = 200,
+                        message = "OK",
+                        body = body,
+                        contentType = "application/vnd.apple.mpegurl; charset=utf-8",
+                        writeBody = method == "GET",
+                    )
                     return
                 }
 
-                val playlist = localM3u8Cache[key]?.content
-                if (playlist == null) {
-                    writeHttpResponse(output, 404, "Not Found", "Playlist expired".toByteArray())
+                if (target.startsWith("/proxy/")) {
+                    val token = target.removePrefix("/proxy/").substringBefore('/')
+                    if (token.isBlank()) {
+                        writeHttpResponse(output, 404, "Not Found", "Not found".toByteArray())
+                        return
+                    }
+                    proxyRemoteResource(
+                        output = output,
+                        token = token,
+                        method = method,
+                        requestHeaders = requestHeaders,
+                    )
                     return
                 }
 
-                val body = playlist.toByteArray(Charsets.UTF_8)
-                writeHttpResponse(
-                    output = output,
-                    code = 200,
-                    message = "OK",
-                    body = body,
-                    contentType = "application/vnd.apple.mpegurl; charset=utf-8",
-                    writeBody = method == "GET",
-                )
+                writeHttpResponse(output, 404, "Not Found", "Not found".toByteArray())
+            }
+        }
+
+        private fun proxyRemoteResource(
+            output: OutputStream,
+            token: String,
+            method: String,
+            requestHeaders: Map<String, String>,
+        ) {
+            val client = localProxyClient
+            val resource = localProxyCache[token]
+            if (client == null || resource == null) {
+                writeHttpResponse(output, 404, "Not Found", "Resource expired".toByteArray())
+                return
+            }
+
+            val requestBuilder = Request.Builder()
+                .url(resource.url)
+            if (method == "HEAD") {
+                requestBuilder.head()
+            } else {
+                requestBuilder.get()
+            }
+            for (i in 0 until resource.headers.size) {
+                requestBuilder.header(resource.headers.name(i), resource.headers.value(i))
+            }
+            requestHeaders["range"]?.let { requestBuilder.header("Range", it) }
+
+            try {
+                client.newCall(requestBuilder.build()).execute().use { response ->
+                    val code = response.code
+                    val message = response.message.ifBlank { "OK" }
+                    val contentType = response.header("Content-Type") ?: "application/octet-stream"
+                    val contentRange = response.header("Content-Range")
+                    val acceptRanges = response.header("Accept-Ranges")
+                    val body = response.body
+                    val contentLength = body?.contentLength() ?: 0L
+
+                    val headers = buildString {
+                        append("HTTP/1.1 ").append(code).append(' ').append(message).append("\r\n")
+                        append("Content-Type: ").append(contentType).append("\r\n")
+                        if (contentLength >= 0) {
+                            append("Content-Length: ").append(contentLength).append("\r\n")
+                        }
+                        if (contentRange != null) append("Content-Range: ").append(contentRange).append("\r\n")
+                        if (acceptRanges != null) append("Accept-Ranges: ").append(acceptRanges).append("\r\n")
+                        append("Cache-Control: no-store\r\n")
+                        append("Connection: close\r\n")
+                        append("\r\n")
+                    }
+                    output.write(headers.toByteArray(Charsets.US_ASCII))
+
+                    if (method == "GET" && body != null) {
+                        body.byteStream().use { input ->
+                            val buffer = ByteArray(16 * 1024)
+                            while (true) {
+                                val read = input.read(buffer)
+                                if (read <= 0) break
+                                output.write(buffer, 0, read)
+                            }
+                        }
+                    }
+                    output.flush()
+                }
+            } catch (_: Exception) {
+                writeHttpResponse(output, 502, "Bad Gateway", "Proxy request failed".toByteArray())
             }
         }
 
@@ -507,6 +672,11 @@ class AnimeVietSub : AnimeHttpSource() {
                 .map { it.key }
             expiredKeys.forEach(localM3u8Cache::remove)
 
+            val expiredProxyKeys = localProxyCache.entries
+                .filter { now - it.value.createdAt > M3U8_CACHE_TTL_MS }
+                .map { it.key }
+            expiredProxyKeys.forEach(localProxyCache::remove)
+
             if (localM3u8Cache.size <= M3U8_CACHE_MAX_SIZE) return
 
             val keysToRemove = localM3u8Cache.entries
@@ -514,10 +684,19 @@ class AnimeVietSub : AnimeHttpSource() {
                 .take(localM3u8Cache.size - M3U8_CACHE_MAX_SIZE)
                 .map { it.key }
             keysToRemove.forEach(localM3u8Cache::remove)
+
+            if (localProxyCache.size <= PROXY_CACHE_MAX_SIZE) return
+
+            val proxyKeysToRemove = localProxyCache.entries
+                .sortedBy { it.value.createdAt }
+                .take(localProxyCache.size - PROXY_CACHE_MAX_SIZE)
+                .map { it.key }
+            proxyKeysToRemove.forEach(localProxyCache::remove)
         }
 
         private const val M3U8_CACHE_TTL_MS = 10 * 60 * 1000L
         private const val M3U8_CACHE_MAX_SIZE = 32
+        private const val PROXY_CACHE_MAX_SIZE = 4096
 
         private val AES_KEY = byteArrayOf(
             0x02, 0x56, 0x94.toByte(), 0x68, 0x64, 0xdc.toByte(), 0xf9.toByte(), 0x96.toByte(),
