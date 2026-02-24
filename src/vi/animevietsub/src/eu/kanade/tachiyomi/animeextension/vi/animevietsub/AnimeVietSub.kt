@@ -211,98 +211,81 @@ class AnimeVietSub : AnimeHttpSource() {
             GET(baseUrl + episode.url, headers),
         ).awaitSuccess().asJsoup()
 
+        val html = epDoc.html()
         val videos = mutableListOf<Video>()
-        val serverButtons = epDoc.select("a.btn3dsv[data-href]")
         val errors = mutableListOf<String>()
 
-        if (serverButtons.isEmpty()) {
-            val title = epDoc.selectFirst("title")?.text() ?: "no title"
-            val bodyText = epDoc.body()?.text()?.take(200) ?: "empty"
-            return listOf(
-                Video("$baseUrl/d", "DBG1: title=$title", "$baseUrl/d"),
-                Video("$baseUrl/d2", "DBG2: $bodyText", "$baseUrl/d2"),
-            )
+        // Extract the hash from AnimeVsub('hash', filmInfo.filmID) in inline script
+        val hash = Regex("""AnimeVsub\('([^']+)'""").find(html)?.groupValues?.get(1)
+        val filmId = Regex("""filmInfo\.filmID\s*=\s*parseInt\('(\d+)'\)""").find(html)?.groupValues?.get(1)
+
+        if (hash == null || filmId == null) {
+            return listOf(Video(
+                "$baseUrl/debug",
+                "No video data found (hash=${hash != null}, filmId=${filmId != null})",
+                "$baseUrl/debug",
+            ))
         }
 
-        for (btn in serverButtons) {
-            val dataHref = btn.attr("data-href")
-            val serverName = btn.text().trim()
-            val play = btn.attr("data-play")
+        // POST the hash to /ajax/player to get the encrypted video data
+        try {
+            val formBody = FormBody.Builder()
+                .add("link", hash)
+                .add("id", filmId)
+                .add("play", "api")
+                .add("backuplinks", "1")
+                .build()
 
-            if (dataHref.isBlank()) continue
+            val playerHeaders = headersBuilder()
+                .set("Referer", baseUrl + episode.url)
+                .add("X-Requested-With", "XMLHttpRequest")
+                .add("Accept", "*/*")
+                .build()
 
-            try {
-                val formBody = FormBody.Builder()
-                    .add("link", dataHref)
-                    .add("id", btn.attr("data-id"))
-                    .add("play", play)
-                    .add("backuplinks", "1")
-                    .build()
+            val playerResp = client.newCall(
+                POST("$baseUrl/ajax/player", headers = playerHeaders, body = formBody),
+            ).awaitSuccess()
 
-                val playerHeaders = headersBuilder()
-                    .set("Referer", baseUrl + episode.url)
-                    .add("X-Requested-With", "XMLHttpRequest")
-                    .add("Accept", "*/*")
-                    .build()
-
-                val playerResp = client.newCall(
-                    POST("$baseUrl/ajax/player", headers = playerHeaders, body = formBody),
-                ).awaitSuccess()
-
-                val playerBody = playerResp.body.string()
-                if (playerBody.isBlank()) {
-                    errors.add("$serverName: empty response")
-                    continue
-                }
-
+            val playerBody = playerResp.body.string()
+            if (playerBody.isBlank()) {
+                errors.add("empty player response")
+            } else {
                 val jsonObj = json.parseToJsonElement(playerBody).jsonObject
                 val success = jsonObj["success"]?.jsonPrimitive?.content
                 if (success != "1") {
-                    errors.add("$serverName: success=$success")
-                    continue
-                }
-
-                val playTech = jsonObj["playTech"]?.jsonPrimitive?.content ?: ""
-                val linkElement = jsonObj["link"]
-                if (linkElement == null || linkElement.toString() == "null") {
-                    errors.add("$serverName: link=null, playTech=$playTech")
-                    continue
-                }
-
-                if (playTech == "api") {
-                    val linkArray = linkElement.jsonArray
-                    for (item in linkArray) {
-                        val file = item.jsonObject["file"]?.jsonPrimitive?.content ?: continue
-                        val m3u8Content = decryptFile(file)
-                        if (m3u8Content == null) {
-                            errors.add("$serverName: decrypt failed")
-                            continue
+                    errors.add("success=$success")
+                } else {
+                    val playTech = jsonObj["playTech"]?.jsonPrimitive?.content ?: ""
+                    val linkElement = jsonObj["link"]
+                    if (linkElement == null || linkElement.toString() == "null") {
+                        errors.add("link=null, playTech=$playTech")
+                    } else if (playTech == "api") {
+                        val linkArray = linkElement.jsonArray
+                        for (item in linkArray) {
+                            val file = item.jsonObject["file"]?.jsonPrimitive?.content ?: continue
+                            val m3u8Content = decryptFile(file)
+                            if (m3u8Content == null) {
+                                errors.add("decrypt failed")
+                                continue
+                            }
+                            videos.addAll(extractVideosFromM3u8(m3u8Content, "AnimeVietSub"))
                         }
-                        videos.addAll(extractVideosFromM3u8(m3u8Content, serverName))
-                    }
-                } else if (playTech == "embed") {
-                    val embedUrl = linkElement.jsonPrimitive.content
-                    if (embedUrl.isNotBlank()) {
-                        extractVideosFromEmbed(embedUrl, serverName)?.let { videos.addAll(it) }
-                            ?: errors.add("$serverName: no m3u8 in embed")
+                    } else if (playTech == "embed") {
+                        val embedUrl = linkElement.jsonPrimitive.content
+                        if (embedUrl.isNotBlank()) {
+                            extractVideosFromEmbed(embedUrl, "AnimeVietSub")?.let { videos.addAll(it) }
+                                ?: errors.add("no m3u8 in embed")
+                        }
                     }
                 }
-            } catch (e: Exception) {
-                errors.add("$serverName: ${e.message}")
             }
+        } catch (e: Exception) {
+            errors.add(e.message ?: "unknown error")
         }
 
         if (videos.isEmpty()) {
-            val errMsg = if (errors.isNotEmpty()) {
-                errors.joinToString("; ")
-            } else {
-                "no errors but no videos either"
-            }
-            return listOf(Video(
-                "$baseUrl/debug",
-                "DEBUG: $errMsg",
-                "$baseUrl/debug",
-            ))
+            val errMsg = if (errors.isNotEmpty()) errors.joinToString("; ") else "no videos found"
+            return listOf(Video("$baseUrl/debug", "DEBUG: $errMsg", "$baseUrl/debug"))
         }
 
         return videos
@@ -316,7 +299,13 @@ class AnimeVietSub : AnimeHttpSource() {
             val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
             cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(AES_KEY, "AES"), IvParameterSpec(iv))
             val decrypted = cipher.doFinal(ciphertext)
-            inflateRaw(decrypted)
+            val inflated = inflateRaw(decrypted)
+            // The inflated result is a JSON string (wrapped in quotes with escaped newlines)
+            if (inflated.startsWith("\"")) {
+                json.parseToJsonElement(inflated).jsonPrimitive.content
+            } else {
+                inflated
+            }
         } catch (_: Exception) {
             null
         }
