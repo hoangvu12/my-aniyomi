@@ -16,12 +16,17 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.FormBody
 import okhttp3.Headers
+import okhttp3.Interceptor
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
+import okhttp3.ResponseBody.Companion.toResponseBody
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.parser.Parser
 import java.io.ByteArrayOutputStream
+import java.util.concurrent.ConcurrentHashMap
 import java.util.zip.Inflater
 import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
@@ -38,6 +43,35 @@ class AnimeVietSub : AnimeHttpSource() {
     override val supportsLatest = true
 
     private val json = Json { ignoreUnknownKeys = true }
+
+    // Cache for decrypted m3u8 playlists served via interceptor
+    private val m3u8Cache = ConcurrentHashMap<String, String>()
+
+    override val client: OkHttpClient = network.cloudflareClient.newBuilder()
+        .addInterceptor(::m3u8Interceptor)
+        .build()
+
+    private fun m3u8Interceptor(chain: Interceptor.Chain): Response {
+        val request = chain.request()
+        val url = request.url.toString()
+
+        // Check if this is a request for a cached m3u8 playlist
+        val prefix = "$baseUrl/internal-m3u8/"
+        if (url.startsWith(prefix)) {
+            val key = url.removePrefix(prefix)
+            val content = m3u8Cache.remove(key)
+            if (content != null) {
+                return Response.Builder()
+                    .request(request)
+                    .protocol(okhttp3.Protocol.HTTP_1_1)
+                    .code(200)
+                    .message("OK")
+                    .body(content.toResponseBody("application/vnd.apple.mpegurl".toMediaType()))
+                    .build()
+            }
+        }
+        return chain.proceed(request)
+    }
 
     override fun headersBuilder(): Headers.Builder = super.headersBuilder()
         .add("Referer", "$baseUrl/")
@@ -221,10 +255,8 @@ class AnimeVietSub : AnimeHttpSource() {
                     val linkArray = linkElement.jsonArray
                     for (item in linkArray) {
                         val file = item.jsonObject["file"]?.jsonPrimitive?.content ?: continue
-                        val m3u8Content = decryptFile(file)
-                        if (m3u8Content != null) {
-                            videos.addAll(extractVideosFromM3u8(m3u8Content, serverName))
-                        }
+                        val m3u8Content = decryptFile(file) ?: continue
+                        videos.addAll(extractVideosFromM3u8(m3u8Content, serverName))
                     }
                 } else if (playTech == "embed") {
                     val embedUrl = linkElement.jsonPrimitive.content
@@ -246,7 +278,6 @@ class AnimeVietSub : AnimeHttpSource() {
             val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
             cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(AES_KEY, "AES"), IvParameterSpec(iv))
             val decrypted = cipher.doFinal(ciphertext)
-            // Decompress with raw inflate (deflate without header)
             inflateRaw(decrypted)
         } catch (_: Exception) {
             null
@@ -254,7 +285,7 @@ class AnimeVietSub : AnimeHttpSource() {
     }
 
     private fun inflateRaw(data: ByteArray): String {
-        val inflater = Inflater(true) // true = raw deflate (no zlib header)
+        val inflater = Inflater(true)
         inflater.setInput(data)
         val output = ByteArrayOutputStream()
         val buffer = ByteArray(4096)
@@ -280,13 +311,11 @@ class AnimeVietSub : AnimeHttpSource() {
                 videos.add(Video(url, "$serverName - $resolution", url))
             }
         } else {
-            // Single quality playlist - use data URI so Aniyomi can play it
-            val hasSegments = m3u8Content.contains("https://")
-            if (hasSegments) {
-                val dataUri = "data:application/x-mpegURL;base64," +
-                    Base64.encodeToString(m3u8Content.toByteArray(), Base64.NO_WRAP)
-                videos.add(Video(dataUri, "$serverName - HLS", dataUri))
-            }
+            // Single quality media playlist — serve via interceptor
+            val key = "${serverName}-${System.currentTimeMillis()}.m3u8"
+            m3u8Cache[key] = m3u8Content
+            val fakeUrl = "$baseUrl/internal-m3u8/$key"
+            videos.add(Video(fakeUrl, "$serverName - HLS", fakeUrl))
         }
 
         return videos
