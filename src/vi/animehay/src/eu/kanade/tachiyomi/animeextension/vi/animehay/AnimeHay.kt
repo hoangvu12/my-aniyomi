@@ -22,7 +22,16 @@ class AnimeHay : AnimeHttpSource() {
 
     override val name = "AnimeHay"
 
-    override val baseUrl = "https://animehay.icu"
+    override val baseUrl = "https://animehay.vin"
+
+    // Dynamically resolve actual domain from animehay.tv redirect page
+    private val currentBaseUrl: String by lazy {
+        runCatching {
+            val html = OkHttpClient().newCall(GET("https://animehay.tv")).execute().use { it.body.string() }
+            val doc = Jsoup.parse(html)
+            doc.selectFirst(".bt-link")?.attr("href")?.trimEnd('/') ?: baseUrl
+        }.getOrDefault(baseUrl)
+    }
 
     override val lang = "vi"
 
@@ -31,10 +40,10 @@ class AnimeHay : AnimeHttpSource() {
     override val client: OkHttpClient = network.cloudflareClient
 
     override fun headersBuilder(): Headers.Builder = super.headersBuilder()
-        .add("Referer", "$baseUrl/")
+        .add("Referer", "$currentBaseUrl/")
 
     override fun popularAnimeRequest(page: Int): Request {
-        return GET("$baseUrl/phim-moi-cap-nhap/trang-$page.html", headers)
+        return GET("$currentBaseUrl/phim-moi-cap-nhap/trang-$page.html", headers)
     }
 
     override fun popularAnimeParse(response: Response): AnimesPage {
@@ -50,7 +59,7 @@ class AnimeHay : AnimeHttpSource() {
         if (query.isBlank()) return popularAnimeRequest(page)
         val encoded = URLEncoder.encode(query.trim(), StandardCharsets.UTF_8.toString())
             .replace("+", "%20")
-        return GET("$baseUrl/tim-kiem/$encoded/trang-$page.html", headers)
+        return GET("$currentBaseUrl/tim-kiem/$encoded/trang-$page.html", headers)
     }
 
     override fun searchAnimeParse(response: Response): AnimesPage {
@@ -177,7 +186,7 @@ class AnimeHay : AnimeHttpSource() {
     }
 
     override suspend fun getEpisodeList(anime: SAnime): List<SEpisode> {
-        val document = client.newCall(GET(baseUrl + anime.url, headers)).awaitSuccess().asJsoup()
+        val document = client.newCall(GET(currentBaseUrl + anime.url, headers)).awaitSuccess().asJsoup()
         val episodeRegex = Regex("""/xem-phim/[a-z0-9\-]+-tap-[^/"']+-\d+\.html""", RegexOption.IGNORE_CASE)
         val episodesByUrl = linkedMapOf<String, SEpisode>()
 
@@ -231,7 +240,7 @@ class AnimeHay : AnimeHttpSource() {
     }
 
     override suspend fun getVideoList(episode: SEpisode): List<Video> {
-        val episodeUrl = baseUrl + episode.url
+        val episodeUrl = currentBaseUrl + episode.url
         val html = client.newCall(GET(episodeUrl, headers)).awaitSuccess().body.string()
 
         val videosByUrl = linkedMapOf<String, Video>()
@@ -276,7 +285,7 @@ class AnimeHay : AnimeHttpSource() {
         }
 
         return videosByUrl.values.toList().ifEmpty {
-            listOf(Video("$baseUrl/debug", "DEBUG: no video found", "$baseUrl/debug"))
+            listOf(Video("$currentBaseUrl/debug", "DEBUG: no video found", "$currentBaseUrl/debug"))
         }
     }
 
@@ -319,8 +328,8 @@ class AnimeHay : AnimeHttpSource() {
     }
 
     private fun buildVideoHeaders(referer: String): Headers {
-        val safeReferer = referer.ifBlank { "$baseUrl/" }
-        val origin = extractOrigin(safeReferer) ?: baseUrl
+        val safeReferer = referer.ifBlank { "$currentBaseUrl/" }
+        val origin = extractOrigin(safeReferer) ?: currentBaseUrl
         return headersBuilder()
             .set("Referer", safeReferer)
             .set("Origin", origin)
@@ -340,7 +349,7 @@ class AnimeHay : AnimeHttpSource() {
     private fun normalizeToRelativeUrl(url: String?): String? {
         if (url.isNullOrBlank()) return null
         return when {
-            url.startsWith(baseUrl) -> url.removePrefix(baseUrl)
+            url.startsWith(currentBaseUrl) -> url.removePrefix(currentBaseUrl)
             url.startsWith("/") -> url
             url.startsWith("http://") || url.startsWith("https://") -> null
             else -> "/$url"
@@ -352,8 +361,8 @@ class AnimeHay : AnimeHttpSource() {
         return when {
             url.startsWith("http://") || url.startsWith("https://") -> url
             url.startsWith("//") -> "https:$url"
-            url.startsWith("/") -> "$baseUrl$url"
-            else -> "$baseUrl/$url"
+            url.startsWith("/") -> "$currentBaseUrl$url"
+            else -> "$currentBaseUrl/$url"
         }
     }
 
