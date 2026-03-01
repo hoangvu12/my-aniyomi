@@ -38,10 +38,10 @@
   {
     "name": "Aniyomi: HentaiZ",
     "pkg": "eu.kanade.tachiyomi.animeextension.vi.hentaiz",
-    "apk": "aniyomi-vi-hentaiz-v14.2.apk",
+    "apk": "aniyomi-vi-hentaiz-v14.3.apk",
     "lang": "vi",
-    "code": 2,
-    "version": "14.2",
+    "code": 3,
+    "version": "14.3",
     "nsfw": 0,
     "sources": [
       {
