@@ -44,7 +44,17 @@ class AnimeVietSub : AnimeHttpSource() {
 
     override val name = "AnimeVietSub"
 
-    override val baseUrl = "https://animevietsub.be"
+    override val baseUrl = "https://animevietsub.how"
+
+    // Dynamically resolve actual domain from permanent short URL
+    private val currentBaseUrl: String by lazy {
+        runCatching {
+            val resp = OkHttpClient().newCall(GET("https://bit.ly/animevietsubtv")).execute()
+            val url = resp.request.url
+            resp.close()
+            "${url.scheme}://${url.host}"
+        }.getOrDefault(baseUrl)
+    }
 
     override val lang = "vi"
 
@@ -55,12 +65,12 @@ class AnimeVietSub : AnimeHttpSource() {
     override val client: OkHttpClient = network.cloudflareClient
 
     override fun headersBuilder(): Headers.Builder = super.headersBuilder()
-        .add("Referer", "$baseUrl/")
+        .add("Referer", "$currentBaseUrl/")
 
     // ============================== Popular ==============================
 
     override fun popularAnimeRequest(page: Int): Request {
-        return GET("$baseUrl/phim-moi/trang-$page.html", headers)
+        return GET("$currentBaseUrl/phim-moi/trang-$page.html", headers)
     }
 
     override fun popularAnimeParse(response: Response): AnimesPage {
@@ -79,7 +89,7 @@ class AnimeVietSub : AnimeHttpSource() {
     // ============================== Latest ===============================
 
     override fun latestUpdatesRequest(page: Int): Request {
-        return GET("$baseUrl/phim-moi/trang-$page.html", headers)
+        return GET("$currentBaseUrl/phim-moi/trang-$page.html", headers)
     }
 
     override fun latestUpdatesParse(response: Response): AnimesPage = popularAnimeParse(response)
@@ -88,7 +98,7 @@ class AnimeVietSub : AnimeHttpSource() {
 
     override fun searchAnimeRequest(page: Int, query: String, filters: AnimeFilterList): Request {
         val encodedQuery = query.replace(" ", "+")
-        return GET("$baseUrl/tim-kiem/$encodedQuery/trang-$page.html", headers)
+        return GET("$currentBaseUrl/tim-kiem/$encodedQuery/trang-$page.html", headers)
     }
 
     override fun searchAnimeParse(response: Response): AnimesPage = popularAnimeParse(response)
@@ -130,7 +140,7 @@ class AnimeVietSub : AnimeHttpSource() {
 
     override suspend fun getEpisodeList(anime: SAnime): List<SEpisode> {
         val detailDoc = client.newCall(
-            GET(baseUrl + anime.url, headers),
+            GET(currentBaseUrl + anime.url, headers),
         ).awaitSuccess().asJsoup()
 
         val filmId = Regex("""-a(\d+)/?$""").find(anime.url)?.groupValues?.get(1)
@@ -144,8 +154,10 @@ class AnimeVietSub : AnimeHttpSource() {
                 ?: detailDoc.selectFirst("a[href\$=.html][href*=${anime.url.trimEnd('/')}]")
 
             if (firstEpLink != null) {
+                val epHref = firstEpLink.attr("href")
+                val epUrl = if (epHref.startsWith("http")) epHref else currentBaseUrl + epHref
                 val epDoc = client.newCall(
-                    GET(baseUrl + firstEpLink.attr("href").removePrefix(baseUrl), headers),
+                    GET(epUrl, headers),
                 ).awaitSuccess().asJsoup()
 
                 episodes.addAll(
@@ -156,7 +168,7 @@ class AnimeVietSub : AnimeHttpSource() {
 
             if (episodes.isEmpty() && filmId != null) {
                 val ajaxResp = client.newCall(
-                    GET("$baseUrl/ajax/get_episode?filmId=$filmId&episodeId=0", headers),
+                    GET("$currentBaseUrl/ajax/get_episode?filmId=$filmId&episodeId=0", headers),
                 ).awaitSuccess()
                 val rssDoc = Jsoup.parse(ajaxResp.body.string(), "", Parser.xmlParser())
                 episodes.addAll(
@@ -172,7 +184,7 @@ class AnimeVietSub : AnimeHttpSource() {
 
                         ParsedEpisode(
                             episode = SEpisode.create().apply {
-                                setUrlWithoutDomain(link.removePrefix(baseUrl))
+                                setUrlWithoutDomain(link.removePrefix(currentBaseUrl))
                                 name = title
                                 episode_number = sortKey.toEpisodeNumber()
                             },
@@ -316,7 +328,7 @@ class AnimeVietSub : AnimeHttpSource() {
 
     override suspend fun getVideoList(episode: SEpisode): List<Video> {
         val epDoc = client.newCall(
-            GET(baseUrl + episode.url, headers),
+            GET(currentBaseUrl + episode.url, headers),
         ).awaitSuccess().asJsoup()
 
         val html = epDoc.html()
@@ -329,9 +341,9 @@ class AnimeVietSub : AnimeHttpSource() {
 
         if (hash == null || filmId == null) {
             return listOf(Video(
-                "$baseUrl/debug",
+                "$currentBaseUrl/debug",
                 "No video data found (hash=${hash != null}, filmId=${filmId != null})",
-                "$baseUrl/debug",
+                "$currentBaseUrl/debug",
             ))
         }
 
@@ -345,13 +357,13 @@ class AnimeVietSub : AnimeHttpSource() {
                 .build()
 
             val playerHeaders = headersBuilder()
-                .set("Referer", baseUrl + episode.url)
+                .set("Referer", currentBaseUrl + episode.url)
                 .add("X-Requested-With", "XMLHttpRequest")
                 .add("Accept", "*/*")
                 .build()
 
             val playerResp = client.newCall(
-                POST("$baseUrl/ajax/player", headers = playerHeaders, body = formBody),
+                POST("$currentBaseUrl/ajax/player", headers = playerHeaders, body = formBody),
             ).awaitSuccess()
 
             val playerBody = playerResp.body.string()
@@ -398,7 +410,7 @@ class AnimeVietSub : AnimeHttpSource() {
 
         if (videos.isEmpty()) {
             val errMsg = if (errors.isNotEmpty()) errors.joinToString("; ") else "no videos found"
-            return listOf(Video("$baseUrl/debug", "DEBUG: $errMsg", "$baseUrl/debug"))
+            return listOf(Video("$currentBaseUrl/debug", "DEBUG: $errMsg", "$currentBaseUrl/debug"))
         }
 
         return videos
@@ -467,8 +479,8 @@ class AnimeVietSub : AnimeHttpSource() {
         if (videos.isEmpty()) {
             // Single quality media playlist — serve via localhost server and proxy segments.
             val streamHeaders = headersBuilder()
-                .set("Referer", "$baseUrl/")
-                .set("Origin", baseUrl)
+                .set("Referer", "$currentBaseUrl/")
+                .set("Origin", currentBaseUrl)
                 .set("Accept", "*/*")
                 .build()
             val localUrl = cacheM3u8AndBuildLocalUrl(
