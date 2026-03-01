@@ -60,7 +60,12 @@ class HentaiZ : AnimeHttpSource() {
         val bodyStr = response.body.string()
         val (entries, totalPages) = parseBrowse(bodyStr)
         val currentPage = response.request.url.queryParameter("page")?.toIntOrNull() ?: 1
-        val animes = entries.map { entry ->
+
+        // Deduplicate by title: each series appears once using its first (latest) episode
+        val seen = mutableSetOf<String>()
+        val animes = entries.mapNotNull { entry ->
+            val key = entry.title.lowercase()
+            if (!seen.add(key)) return@mapNotNull null
             SAnime.create().apply {
                 setUrlWithoutDomain("/watch/${entry.slug}")
                 title = entry.title
@@ -184,6 +189,7 @@ class HentaiZ : AnimeHttpSource() {
 
         val streamHeaders = Headers.Builder()
             .add("Referer", "https://play.sonar-cdn.com/")
+            .add("User-Agent", BROWSER_USER_AGENT)
             .build()
 
         val videos = STREAM_INFO_REGEX.findAll(masterM3u8).map { match ->
@@ -316,6 +322,8 @@ class HentaiZ : AnimeHttpSource() {
     companion object {
         private const val PAGE_SIZE = 24
         private const val STORAGE_URL = "https://storage.haiten.org"
+        private const val BROWSER_USER_AGENT =
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"
         private val STREAM_INFO_REGEX = Regex(
             """#EXT-X-STREAM-INF:[^\n]*RESOLUTION=(\d+x\d+)[^\n]*\n([^\n]+)""",
         )
