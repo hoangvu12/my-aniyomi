@@ -124,13 +124,23 @@ class HentaiZ : AnimeHttpSource() {
 
         if (title != null) {
             val encoded = URLEncoder.encode(title, StandardCharsets.UTF_8.toString())
-            val searchBody = client.newCall(
-                GET("$baseUrl/browse/__data.json?q=$encoded&limit=100", headers),
-            ).awaitSuccess().body.string()
+            val allEntries = mutableListOf<BrowseEntry>()
+            var page = 1
 
-            val (entries, _) = parseBrowse(searchBody)
-            val episodes = entries
-                .filter { it.title.equals(title, ignoreCase = true) }
+            while (true) {
+                val searchBody = client.newCall(
+                    GET("$baseUrl/browse/__data.json?q=$encoded&page=$page&limit=$PAGE_SIZE", headers),
+                ).awaitSuccess().body.string()
+
+                val (entries, totalPages) = parseBrowse(searchBody)
+                allEntries.addAll(entries.filter { it.title.equals(title, ignoreCase = true) })
+
+                // Stop if no more pages or no title matches found on this page
+                if (page >= totalPages || entries.none { it.title.equals(title, ignoreCase = true) }) break
+                page++
+            }
+
+            val episodes = allEntries
                 .sortedByDescending { it.episodeNumber }
                 .map { entry ->
                     SEpisode.create().apply {
