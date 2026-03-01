@@ -2,17 +2,17 @@
   {
     "name": "Aniyomi: AnimeHay",
     "pkg": "eu.kanade.tachiyomi.animeextension.vi.animehay",
-    "apk": "aniyomi-vi-animehay-v14.1.apk",
+    "apk": "aniyomi-vi-animehay-v14.2.apk",
     "lang": "vi",
-    "code": 1,
-    "version": "14.1",
+    "code": 2,
+    "version": "14.2",
     "nsfw": 0,
     "sources": [
       {
         "name": "AnimeHay",
         "lang": "vi",
         "id": "9145826723655776440",
-        "baseUrl": "https://animehay.icu",
+        "baseUrl": "https://animehay.vin",
         "versionId": 1
       }
     ]
@@ -20,17 +20,17 @@
   {
     "name": "Aniyomi: AnimeVietSub",
     "pkg": "eu.kanade.tachiyomi.animeextension.vi.animevietsub",
-    "apk": "aniyomi-vi-animevietsub-v14.13.apk",
+    "apk": "aniyomi-vi-animevietsub-v14.14.apk",
     "lang": "vi",
-    "code": 13,
-    "version": "14.13",
+    "code": 14,
+    "version": "14.14",
     "nsfw": 0,
     "sources": [
       {
         "name": "AnimeVietSub",
         "lang": "vi",
         "id": "8403388926739991946",
-        "baseUrl": "https://animevietsub.be",
+        "baseUrl": "https://animevietsub.how",
         "versionId": 1
       }
     ]
