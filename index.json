@@ -36,6 +36,24 @@
     ]
   },
   {
+    "name": "Aniyomi: HentaiZ",
+    "pkg": "eu.kanade.tachiyomi.animeextension.vi.hentaiz",
+    "apk": "aniyomi-vi-hentaiz-v14.1.apk",
+    "lang": "vi",
+    "code": 1,
+    "version": "14.1",
+    "nsfw": 0,
+    "sources": [
+      {
+        "name": "HentaiZ",
+        "lang": "vi",
+        "id": "4399909888598427352",
+        "baseUrl": "https://hentaiz.dog",
+        "versionId": 1
+      }
+    ]
+  },
+  {
     "name": "Aniyomi: KKPhim",
     "pkg": "eu.kanade.tachiyomi.animeextension.vi.kkphim",
     "apk": "aniyomi-vi-kkphim-v14.1.apk",
